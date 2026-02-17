@@ -81,7 +81,7 @@ if ! dpkg -l | grep -q msodbcsql17; then
 fi
 
 ##################################################
-# STEP 5 – INSTALL REDMINE
+# STEP 5 – INSTALL REDMINE & PLUGINS
 ##################################################
 if [ ! -d "/opt/redmine" ]; then
     # Checkout Redmine 5.1-stable (compatible with Ubuntu 22.04 Ruby 3.0)
@@ -93,6 +93,11 @@ if [ ! -d "/opt/redmine" ]; then
     fi
     
     chown -R redmine:redmine /opt/redmine
+fi
+
+# Clone OIDC Plugin (redmine_omniauth_openid_connect) logic
+if [ ! -d "/opt/redmine/plugins/redmine_omniauth_openid_connect" ]; then
+    git clone https://github.com/ale/redmine_omniauth_openid_connect.git /opt/redmine/plugins/redmine_omniauth_openid_connect
 fi
 
 cd /opt/redmine
@@ -115,32 +120,37 @@ cat <<EOF > config/database.yml
 production:
   adapter: sqlserver
   mode: dblib
-  host: ${SQL_FQDN}
-  database: ${DB_NAME}
+  host: "${SQL_FQDN}"
+  database: "${DB_NAME}"
   username: sqladmin
-  password: ${SQL_PASSWORD}
+  password: "${SQL_PASSWORD}"
   encoding: utf8
 EOF
+chmod 600 config/database.yml
+chown redmine:redmine config/database.yml
 
 # Set secret key base
 if [ ! -f config/secrets.yml ]; then
     echo "production:" > config/secrets.yml
-    echo "  secret_key_base: ${REDMINE_SECRET_KEY}" >> config/secrets.yml
+    echo "  secret_key_base: \"${REDMINE_SECRET_KEY}\"" >> config/secrets.yml
 else
     # Update secret_key_base if needed, or assume it's set. 
     # For idempotency, we can overwrite or regex replace. 
     # Here we overwrite to ensure it matches Key Vault.
     sed -i "/secret_key_base:/d" config/secrets.yml || true
     if grep -q "production:" config/secrets.yml; then
-        sed -i "/production:/a \  secret_key_base: ${REDMINE_SECRET_KEY}" config/secrets.yml
+        sed -i "/production:/a \  secret_key_base: \"${REDMINE_SECRET_KEY}\"" config/secrets.yml
     else
         echo "production:" >> config/secrets.yml
-        echo "  secret_key_base: ${REDMINE_SECRET_KEY}" >> config/secrets.yml
+        echo "  secret_key_base: \"${REDMINE_SECRET_KEY}\"" >> config/secrets.yml
     fi
 fi
+chmod 600 config/secrets.yml
+chown redmine:redmine config/secrets.yml
 
-# Run migrations
+# Run migrations (DB and Plugins)
 bundle exec rake db:migrate RAILS_ENV=production
+bundle exec rake redmine:plugins:migrate RAILS_ENV=production
 
 ##################################################
 # STEP 7 – CONFIGURE OPENID CONNECT
@@ -163,12 +173,8 @@ Rails.application.config.middleware.use OmniAuth::Builder do
   }
 end
 EOF
-
-# Also ensure Redmine settings allow on-the-fly registration or similar if needed? 
-# The prompt doesn't specify Redmine internal settings, just the initializer.
-# Note: 'omniauth-openid-connect' plugin installation usually implies the 'redmine_omniauth_openid_connect' logic
-# or manually handling the callbacks. 
-# Prompt says: "Configure initializer with...". We follow that strictly.
+chmod 600 config/initializers/01_openid_connect.rb
+chown redmine:redmine config/initializers/01_openid_connect.rb
 
 ##################################################
 # STEP 8 – CONFIGURE PUMA
@@ -192,7 +198,7 @@ After=network.target
 Type=simple
 User=redmine
 WorkingDirectory=/opt/redmine
-ExecStart=/usr/local/bin/bundle exec puma -C config/puma.rb
+ExecStart=/usr/bin/env bundle exec puma -C config/puma.rb
 Restart=always
 RestartSec=1
 Environment=RAILS_ENV=production
@@ -218,7 +224,7 @@ server {
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Proto https;
     }
 }
 EOF
