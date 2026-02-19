@@ -236,14 +236,28 @@ resource nsgAppGw 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
   properties: {
     securityRules: [
       {
-        name: 'AllowInternetInbound'
+        name: 'AllowInternetInboundHttp'
         properties: {
-          description: 'Allow inbound traffic from Internet (ports 80, 443)'
+          description: 'Allow inbound HTTP traffic from Internet (port 80)'
           protocol: 'Tcp'
           sourcePortRange: '*'
-          destinationPortRange: '80,443'
+          destinationPortRange: '80'
           access: 'Allow'
           priority: 100
+          direction: 'Inbound'
+          sourceAddressPrefix: 'Internet'
+          destinationAddressPrefix: '*'
+        }
+      }
+      {
+        name: 'AllowInternetInboundHttps'
+        properties: {
+          description: 'Allow inbound HTTPS traffic from Internet (port 443)'
+          protocol: 'Tcp'
+          sourcePortRange: '*'
+          destinationPortRange: '443'
+          access: 'Allow'
+          priority: 105
           direction: 'Inbound'
           sourceAddressPrefix: 'Internet'
           destinationAddressPrefix: '*'
