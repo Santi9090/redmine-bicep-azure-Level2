@@ -1,4 +1,4 @@
-extension microsoftGraph
+extension 'br:mcr.microsoft.com/bicep/extensions/microsoftgraph/v1.0:0.1.8-preview'
 
 targetScope = 'resourceGroup'
 
@@ -37,8 +37,11 @@ param redmineSecretKey string
 @secure()
 param entraClientSecret string
 
+@description('Admin username for the VM.')
+param adminUsername string = 'azureuser'
+
 @description('URL of the install script to execute on the VM.')
-param installScriptUrl string = 'https://raw.githubusercontent.com/Azure/azure-quickstart-templates/master/application-workloads/redmine/redmine-on-ubuntu/install.sh'
+param installScriptUrl string = 'https://github.com/Santi9090/redmine-bicep-azure-Level2/blob/main/redmine-bicepv2.sh'
 
 @description('Base64 encoded SSL Certificate data for App Gateway. PFX format.')
 @secure()
@@ -67,7 +70,6 @@ var sqlDbName = '${environmentName}-redmine-db'
 var kvName = 'kv-${uniqueString(resourceGroup().id, environmentName)}' // Max 24 chars
 var logAnalyticsName = '${environmentName}-law-${uniqueSuffix}'
 var appRegistrationName = '${environmentName}-redmine-app'
-var managedIdentityName = '${environmentName}-vm-identity'
 
 // Subnets
 var subnetAppGwName = 'Subnet-AppGateway'
@@ -421,7 +423,6 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
   }
   dependsOn: [
     vnet
-    appGwPip
   ]
 }
 
@@ -452,6 +453,9 @@ resource appGwDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = 
 // ==============================================================================
 // RESOURCES: MICROSOFT GRAPH (ENTRA ID)
 // ==============================================================================
+// Se usa la extensión de Microsoft Graph desde el registry público de Bicep.
+// Requiere que el principal que ejecuta el deploy tenga el rol
+// 'Application Administrator' en Microsoft Entra ID.
 
 resource appReg 'Microsoft.Graph/applications@v1.0' = {
   displayName: appRegistrationName
@@ -467,7 +471,6 @@ resource appReg 'Microsoft.Graph/applications@v1.0' = {
   passwordCredentials: [
     {
       displayName: 'redmine-secret'
-      secretText: entraClientSecret
       endDateTime: '2099-12-31T23:59:59Z'
     }
   ]
@@ -475,6 +478,59 @@ resource appReg 'Microsoft.Graph/applications@v1.0' = {
 
 resource sp 'Microsoft.Graph/servicePrincipals@v1.0' = {
   appId: appReg.appId
+}
+
+// ==============================================================================
+// RESOURCES: DEPLOYMENT IDENTITY + SCRIPT (CONFIGURA EL SECRET AUTOMÁTICAMENTE)
+// ==============================================================================
+// La Graph API no permite asignar el texto del secreto declarativamente.
+// Este deploymentScript corre 'az ad app credential reset' después de que
+// el App Registration es creado, configurando el secreto exacto en Microsoft.
+//
+// REQUISITO PREVIO (una sola vez, antes del primer deploy):
+//   az identity create --name <deployIdentityName> --resource-group <RG>
+//   az role assignment create --assignee <principalId> \
+//     --role "Application Administrator" --scope /
+//   (o en el portal: Entra ID > Roles > Application Administrator > Assign)
+
+resource deployIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: '${environmentName}-deploy-identity'
+  location: location
+}
+
+resource configureAppSecret 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
+  name: '${environmentName}-configure-app-secret'
+  location: location
+  kind: 'AzureCLI'
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${deployIdentity.id}': {}
+    }
+  }
+  properties: {
+    azCliVersion: '2.52.0'
+    retentionInterval: 'P1D'
+    timeout: 'PT10M'
+    cleanupPreference: 'OnSuccess'
+    environmentVariables: [
+      { name: 'APP_ID', value: appReg.appId }
+      { name: 'APP_SECRET', secureValue: entraClientSecret }
+    ]
+    scriptContent: '''
+      set -e
+      az ad app credential reset \
+        --id "$APP_ID" \
+        --password "$APP_SECRET" \
+        --display-name "redmine-secret" \
+        --end-date "2099-12-31" \
+        --append
+      echo "Secreto configurado correctamente para App ID: $APP_ID"
+    '''
+  }
+  dependsOn: [
+    sp
+  ]
 }
 
 // ==============================================================================
@@ -544,7 +600,9 @@ resource privateEndpointSql 'Microsoft.Network/privateEndpoints@2023-04-01' = {
   ]
 }
 
+#disable-next-line no-hardcoded-env-urls
 resource privateDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+  #disable-next-line no-hardcoded-env-urls
   name: 'privatelink.database.windows.net'
   location: 'global'
 }
@@ -567,6 +625,7 @@ resource privateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneG
   properties: {
     privateDnsZoneConfigs: [
       {
+        #disable-next-line no-hardcoded-env-urls
         name: 'privatelink.database.windows.net'
         properties: {
           privateDnsZoneId: privateDnsZone.id
@@ -667,7 +726,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-03-01' = {
     }
     osProfile: {
       computerName: vmName
-      adminUsername: 'azureuser'
+      adminUsername: adminUsername
       linuxConfiguration: {
         disablePasswordAuthentication: true
         ssh: {
@@ -703,7 +762,6 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-03-01' = {
     }
   }
   dependsOn: [
-    nic
     keyVault
   ]
 }
