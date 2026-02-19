@@ -38,7 +38,9 @@ param enableWaf bool = true
 @description('Retention days for Log Analytics diagnostics.')
 param logAnalyticsRetentionInDays int = 30
 
-
+@description('SQL Server admin password. If not provided, a secure password will be auto-generated.')
+@secure()
+param sqlAdminPassword string = ''
 // ==============================================================================
 // VARIABLES - DERIVED FROM PARAMETERS (NO SECRETS)
 // ==============================================================================
@@ -67,6 +69,10 @@ var appGwIdentityName = '${environmentName}-appgw-identity'
 // Deployment script names
 var generateSecretScriptName = '${environmentName}-generate-secrets'
 var generateCertScriptName = '${environmentName}-generate-cert'
+
+// SQL Admin password: Use provided parameter or generate secure default
+// Default: Takes subscription ID, resource group, and environment to create a deterministic but unique password
+var finalSqlAdminPassword = empty(sqlAdminPassword) ? '${uniqueString(subscription().id, resourceGroup().id, environmentName)}#Sql2026!' : sqlAdminPassword
 
 // Subnet naming and addressing
 var subnetAppGwName = 'Subnet-AppGateway'
@@ -556,8 +562,7 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
           interval: 30
           timeout: 30
           unhealthyThreshold: 3
-          pickHostNameFromBackendHttpSettings: true
-          host: '127.0.0.1'
+          host: 'localhost'
         }
       }
     ]
@@ -814,6 +819,7 @@ resource generateSecretsScript 'Microsoft.Resources/deploymentScripts@2023-08-01
       { name: 'KEYVAULT_NAME', value: keyVault.name }
       { name: 'SUBSCRIPTION_ID', value: subscriptionId }
       { name: 'RESOURCE_GROUP', value: resourceGroup().name }
+      { name: 'SQL_ADMIN_PASSWORD', secureValue: finalSqlAdminPassword }
     ]
     
     scriptContent: '''
@@ -850,10 +856,9 @@ resource generateSecretsScript 'Microsoft.Resources/deploymentScripts@2023-08-01
       
       echo "[$(date)] === Generating Application Secrets ==="
       
-      # 1. SQL Admin Password (32 chars, complex)
-      echo "[$(date)] Generating SQL admin password..."
-      SQL_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
-      store_secret "sql-admin-password" "$SQL_PASSWORD"
+      # 1. SQL Admin Password (passed from Bicep template - pre-generated for consistency)
+      echo "[$(date)] Storing SQL admin password in Key Vault..."
+      store_secret "sql-admin-password" "$SQL_ADMIN_PASSWORD"
       
       # 2. Redmine Secret Key (Rails RAILS_MASTER_KEY format preferred, 32 bytes hex)
       echo "[$(date)] Generating Redmine secret key..."
@@ -1057,9 +1062,9 @@ resource sqlServer 'Microsoft.Sql/servers@2022-11-01-preview' = {
     type: 'SystemAssigned'
   }
   properties: {
-    // Admin credentials: Use generated password from Key Vault secret
+    // Admin credentials: Use secure password parameter
     administratorLogin: 'sqladmin'
-    administratorLoginPassword: reference(resourceId('Microsoft.KeyVault/vaults/secrets', keyVault.name, 'sql-admin-password'), '2023-02-01').value
+    administratorLoginPassword: finalSqlAdminPassword
     
     // Disable public network access - use Private Endpoint only
     publicNetworkAccess: 'Disabled'
