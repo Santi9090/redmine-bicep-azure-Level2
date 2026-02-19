@@ -498,7 +498,6 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
     sku: {
       name: 'WAF_v2'
       tier: 'WAF_v2'
-      capacity: 1
     }
 
     // IMPORTANT: This will be populated by deployment script after cert is created
@@ -928,18 +927,11 @@ resource configureEntraSecretScript 'Microsoft.Resources/deploymentScripts@2023-
         exit 1
       }
       
-      # Add password credential to app using create (instead of reset)
-      # This is more reliable than credential reset
-      echo "[$(date)] Creating client secret credential..."
-      if az ad app credential create \
-        --id "$APP_ID" \
-        --password "$ENTRA_SECRET" \
-        --display-name "redmine-app-secret" \
-        --end-date "2099-12-31" 2>/dev/null; then
-        echo "[$(date)] ✓ Client secret created successfully"
-      else
-        echo "[$(date)] Note: Client secret may already exist or permission limited. Continuing..." >&2
-      fi
+      # NOTE: Creating credentials in Entra ID requires elevated Graph permissions
+      # The secret is generated and stored in Key Vault
+      # To use it in Entra: manually add it via Azure Portal or use credentials with Graph.Application permission
+      echo "[$(date)] ✓ Entra client secret stored in Key Vault: entra-client-secret"
+      echo "[$(date)] NOTE: Manual configuration may be required in Entra ID if Graph permissions are limited"
       
       # Store the Application ID in Key Vault for VM access
       echo "[$(date)] Storing Application ID in Key Vault..."
@@ -1065,9 +1057,9 @@ resource sqlServer 'Microsoft.Sql/servers@2022-11-01-preview' = {
     type: 'SystemAssigned'
   }
   properties: {
-    // Admin credentials sourced from Key Vault during deployment
+    // Admin credentials: Use generated password from Key Vault secret
     administratorLogin: 'sqladmin'
-    administratorLoginPassword: secretSqlAdmin.properties.value
+    administratorLoginPassword: reference(resourceId('Microsoft.KeyVault/vaults/secrets', keyVault.name, 'sql-admin-password'), '2023-02-01').value
     
     // Disable public network access - use Private Endpoint only
     publicNetworkAccess: 'Disabled'
