@@ -272,14 +272,14 @@ resource nsgAppGw 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
       {
         name: 'AllowGatewayManager'
         properties: {
-          description: 'Allow Azure Gateway Manager health probes'
+          description: 'Allow Azure Gateway Manager health probes (required for WAF v2)'
           protocol: 'Tcp'
           sourcePortRange: '*'
           destinationPortRange: '65200-65535'
           access: 'Allow'
           priority: 110
           direction: 'Inbound'
-          sourceAddressPrefix: 'GatewayManager'
+          sourceAddressPrefix: '*'
           destinationAddressPrefix: '*'
         }
       }
@@ -758,37 +758,15 @@ resource appGwDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = 
 // App Registration for OIDC-based authentication to Redmine
 // IMPORTANT: Credentials are auto-generated and stored securely in Key Vault
 
-resource appReg 'Microsoft.Graph/applications@v1.0' = {
-  displayName: appRegistrationName
-  uniqueName: appRegistrationName
-  signInAudience: 'AzureADMyOrg'
-  
-  web: {
-    redirectUris: [
-      'https://placeholder.example.com/auth/oidc/callback' // Will be updated by configureEntraSecretScript
-    ]
-    implicitGrantSettings: {
-      enableIdTokenIssuance: true
-    }
-  }
-  
-  publicClient: {
-    redirectUris: []
-  }
-  
-  description: 'Redmine OpenID Connect integration for ${environmentName} environment'
-  
-  tags: [
-    'redmine'
-    'oidc'
-    environmentName
-  ]
-}
+// NOTE: App Registration must be created manually or via Graph API with elevated permissions:
+// 1. Create app registration in Azure Portal or via 'az ad app create'
+// 2. Store the Client ID in Key Vault as 'entra-client-id'
+// 3. Create a client secret and store as 'entra-client-secret'
+// 4. Set the redirect URI to: https://<app-gateway-fqdn>/auth/oidc/callback
+// This resource is commented out due to deployment identity lacking Graph.Application permissions
 
-resource sp 'Microsoft.Graph/servicePrincipals@v1.0' = {
-  appId: appReg.appId
-  displayName: appRegistrationName
-}
+// Placeholder output for app registration - replace with actual App ID after manual creation
+var entraClientIdPlaceholder = appRegistrationName // Update after manual app registration creation
 
 
 // ==============================================================================
@@ -895,67 +873,49 @@ resource generateSecretsScript 'Microsoft.Resources/deploymentScripts@2023-08-01
 }
 
 // ===== STEP 2: Configure Entra App Registration with auto-generated secret =====
-resource configureEntraSecretScript 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
-  name: '${environmentName}-configure-entra-secret'
-  location: location
-  kind: 'AzureCLI'
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${deployIdentity.id}': {}
-    }
-  }
-  properties: {
-    azCliVersion: '2.52.0'
-    retentionInterval: 'P1D'
-    timeout: 'PT10M'
-    cleanupPreference: 'OnSuccess'
-    
-    environmentVariables: [
-      { name: 'APP_ID', value: appReg.appId }
-      { name: 'KEYVAULT_NAME', value: keyVault.name }
-    ]
-    
-    scriptContent: '''
-      #!/bin/bash
-      set -euo pipefail
-      
-      echo "[$(date)] Configuring Entra App Registration Client Secret"
-      
-      # Retrieve the auto-generated secret from Key Vault
-      echo "[$(date)] Retrieving secret from Key Vault..."
-      ENTRA_SECRET=$(az keyvault secret show \
-        --vault-name "$KEYVAULT_NAME" \
-        --name "entra-client-secret" \
-        --query value -o tsv) || {
-        echo "[$(date)] Error: Failed to retrieve secret from Key Vault" >&2
-        exit 1
-      }
-      
-      # NOTE: Creating credentials in Entra ID requires elevated Graph permissions
-      # The secret is generated and stored in Key Vault
-      # To use it in Entra: manually add it via Azure Portal or use credentials with Graph.Application permission
-      echo "[$(date)] ✓ Entra client secret stored in Key Vault: entra-client-secret"
-      echo "[$(date)] NOTE: Manual configuration may be required in Entra ID if Graph permissions are limited"
-      
-      # Store the Application ID in Key Vault for VM access
-      echo "[$(date)] Storing Application ID in Key Vault..."
-      az keyvault secret set \
-        --vault-name "$KEYVAULT_NAME" \
-        --name "entra-client-id" \
-        --value "$APP_ID" > /dev/null || {
-        echo "[$(date)] Warning: Failed to store client ID in Key Vault" >&2
-      }
-      
-      echo "[$(date)] ✓ Entra configuration completed"
-    '''
-  }
-  
-  dependsOn: [
-    sp
-    generateSecretsScript
-  ]
-}
+// NOTE: Entra App Registration configuration script is disabled due to deployment identity
+// lacking Graph.Application permissions. This script would normally:
+// 1. Get the APP_ID from the manually created app registration
+// 2. Store it in Key Vault for the VM to consume
+// 3. Add the client secret to Entra ID
+// 
+// MANUAL SETUP REQUIRED:
+// 1. Create the app registration and client secret manually via Azure Portal or 'az ad app create'
+// 2. Get the Application (Client) ID from the app registration
+// 3. Store both in Key Vault under 'entra-client-id' and 'entra-client-secret'
+// 4. Set the redirect URI to: https://<appGatewayFqdn>/auth/oidc/callback
+//
+// resource configureEntraSecretScript 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
+//   name: '${environmentName}-configure-entra-secret'
+//   location: location
+//   kind: 'AzureCLI'
+//   identity: {
+//     type: 'UserAssigned'
+//     userAssignedIdentities: {
+//       '${deployIdentity.id}': {}
+//     }
+//   }
+//   properties: {
+//     azCliVersion: '2.52.0'
+//     retentionInterval: 'P1D'
+//     timeout: 'PT10M'
+//     cleanupPreference: 'OnSuccess'
+//     
+//     environmentVariables: [
+//       { name: 'KEYVAULT_NAME', value: keyVault.name }
+//     ]
+//     
+//     scriptContent: '''
+//       #!/bin/bash
+//       set -euo pipefail
+//       echo "[$(date)] Entra configuration skipped - requires manual setup via Portal"
+//     '''
+//   }
+//   
+//   dependsOn: [
+//     generateSecretsScript
+//   ]
+// }
 
 // ===== STEP 3: Generate self-signed certificate for Application Gateway =====
 resource generateCertificateScript 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
@@ -1071,14 +1031,6 @@ resource sqlServer 'Microsoft.Sql/servers@2022-11-01-preview' = {
     
     // Require encrypted connections only
     minimalTlsVersion: '1.2'
-    
-    // Azure AD authentication support (optional, for future use)
-    administrators: {
-      administratorType: 'ActiveDirectory'
-      azureADOnlyAuthentication: false // Set to true if you want AAD-only auth
-      principalType: 'Group'
-      tenantId: tenantId
-    }
   }
 }
 
@@ -1288,13 +1240,15 @@ resource secretSshPublic 'Microsoft.KeyVault/vaults/secrets@2023-02-01' = {
   ]
 }
 
-resource secretEntraClientId 'Microsoft.KeyVault/vaults/secrets@2023-02-01' = {
-  parent: keyVault
-  name: 'entra-client-id'
-  properties: {
-    value: appReg.appId
-  }
-}
+// Entra Client ID secret - Store the actual Client ID after manual app registration creation
+// Un-comment and update the value after creating the app registration manually
+// resource secretEntraClientId 'Microsoft.KeyVault/vaults/secrets@2023-02-01' = {
+//   parent: keyVault
+//   name: 'entra-client-id'
+//   properties: {
+//     value: '<YOUR_APP_REGISTRATION_CLIENT_ID>'
+//   }
+// }
 
 resource secretEntraClientSecret 'Microsoft.KeyVault/vaults/secrets@2023-02-01' = {
   parent: keyVault
@@ -1469,13 +1423,13 @@ resource vmExtension 'Microsoft.Compute/virtualMachines/extensions@2023-03-01' =
         installScriptUrl
       ]
       // Command executed with access to the environment variables and MSI token
-      commandToExecute: 'bash install.sh "${kvName}" "${sqlServer.properties.fullyQualifiedDomainName}" "${sqlDbName}" "${tenantId}" "${appReg.appId}"'
+      // NOTE: appReg.appId must be retrieved from Key Vault (entra-client-id) by the install script
+      commandToExecute: 'bash install.sh "${kvName}" "${sqlServer.properties.fullyQualifiedDomainName}" "${sqlDbName}" "${tenantId}"'
     }
   }
   
   dependsOn: [
     roleAssignKvSecretsToVm
-    configureEntraSecretScript
     sqlDb
     appGateway
   ]
@@ -1508,7 +1462,7 @@ output tenantId string = tenantId
 
 output enviromentName string = environmentName
 
-output appRegistrationClientId string = appReg.appId
+// output appRegistrationClientId string = appReg.appId  // Create app registration manually and retrieve Client ID from Azure Portal
 
 output vmName string = vm.name
 
