@@ -50,7 +50,7 @@ var subscriptionId = subscription().subscriptionId
 var uniqueSuffix = uniqueString(resourceGroup().id)
 
 // Key Vault must be 3-24 characters, alphanumeric and hyphens only
-var kvName = 'kv${replace(uniqueString(resourceGroup().id, environmentName), '-', '')}' 
+var kvName = 'kv${replace(uniqueString(resourceGroup().id, environmentName), '-', '')}'
 
 // Resource naming convention: {env}-{resource}-{hash}
 var vnetName = '${environmentName}-vnet'
@@ -72,7 +72,9 @@ var generateCertScriptName = '${environmentName}-generate-cert'
 
 // SQL Admin password: Use provided parameter or generate secure default
 // Default: Takes subscription ID, resource group, and environment to create a deterministic but unique password
-var finalSqlAdminPassword = empty(sqlAdminPassword) ? '${uniqueString(subscription().id, resourceGroup().id, environmentName)}#Sql2026!' : sqlAdminPassword
+var finalSqlAdminPassword = empty(sqlAdminPassword)
+  ? '${uniqueString(subscription().id, resourceGroup().id, environmentName)}#Sql2026!'
+  : sqlAdminPassword
 
 // Subnet naming and addressing
 var subnetAppGwName = 'Subnet-AppGateway'
@@ -279,7 +281,7 @@ resource nsgAppGw 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
           access: 'Allow'
           priority: 110
           direction: 'Inbound'
-          sourceAddressPrefix: '*'
+          sourceAddressPrefix: 'GatewayManager'
           destinationAddressPrefix: '*'
         }
       }
@@ -361,7 +363,6 @@ resource nsgDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
   }
 }
 
-
 // ==============================================================================
 // RESOURCES: KEY VAULT (Secrets Management - Enterprise Grade)
 // ==============================================================================
@@ -379,24 +380,24 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-02-01' = {
       name: 'standard'
     }
     tenantId: tenantId
-    
+
     // RBAC Authorization: Modern approach (not legacy Access Policies)
     enableRbacAuthorization: true
-    
+
     // Soft delete: 90 days default window
     enableSoftDelete: true
     softDeleteRetentionInDays: 90
-    
+
     // Purge protection: Prevents accidental hard-deletion
     enablePurgeProtection: true
-    
+
     // Network policies
     publicNetworkAccess: 'Enabled' // Can be 'Disabled' with Private Endpoint
     networkAcls: {
       defaultAction: 'Allow'
       bypass: 'AzureServices'
     }
-    
+
     // Logging
     enabledForDeployment: true
     enabledForDiskEncryption: false
@@ -461,7 +462,6 @@ resource roleAssignKvSecretsToAppGw 'Microsoft.Authorization/roleAssignments@202
     principalType: 'ServicePrincipal'
   }
 }
-
 
 // ==============================================================================
 // RESOURCES: APPLICATION GATEWAY (Ingress Controller + WAF)
@@ -644,7 +644,11 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
             id: resourceId('Microsoft.Network/applicationGateways/httpListeners', appGwName, 'listener_80')
           }
           redirectConfiguration: {
-            id: resourceId('Microsoft.Network/applicationGateways/redirectConfigurations', appGwName, 'redirectConfigHttp')
+            id: resourceId(
+              'Microsoft.Network/applicationGateways/redirectConfigurations',
+              appGwName,
+              'redirectConfigHttp'
+            )
           }
           priority: 1
         }
@@ -703,6 +707,8 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
 
   dependsOn: [
     vnet
+    roleAssignKvSecretsToAppGw
+    generateCertificateScript
   ]
 }
 
@@ -716,41 +722,24 @@ resource appGwDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = 
       {
         category: 'ApplicationGatewayAccessLog'
         enabled: true
-        retentionPolicy: {
-          enabled: true
-          days: logAnalyticsRetentionInDays
-        }
       }
       {
         category: 'ApplicationGatewayFirewallLog'
         enabled: true
-        retentionPolicy: {
-          enabled: true
-          days: logAnalyticsRetentionInDays
-        }
       }
       {
         category: 'ApplicationGatewayPerformanceLog'
         enabled: true
-        retentionPolicy: {
-          enabled: true
-          days: logAnalyticsRetentionInDays
-        }
       }
     ]
     metrics: [
       {
         category: 'AllMetrics'
         enabled: true
-        retentionPolicy: {
-          enabled: true
-          days: logAnalyticsRetentionInDays
-        }
       }
     ]
   }
 }
-
 
 // ==============================================================================
 // RESOURCES: ENTRA ID APP REGISTRATION (OpenID Connect Integration)
@@ -767,7 +756,6 @@ resource appGwDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = 
 
 // Placeholder output for app registration - replace with actual App ID after manual creation
 var entraClientIdPlaceholder = appRegistrationName // Update after manual app registration creation
-
 
 // ==============================================================================
 // RESOURCES: SECRET GENERATION (Deployment-Time Automation)
@@ -792,14 +780,14 @@ resource generateSecretsScript 'Microsoft.Resources/deploymentScripts@2023-08-01
     retentionInterval: 'P1D'
     timeout: 'PT20M'
     cleanupPreference: 'OnSuccess'
-    
+
     environmentVariables: [
       { name: 'KEYVAULT_NAME', value: keyVault.name }
       { name: 'SUBSCRIPTION_ID', value: subscriptionId }
       { name: 'RESOURCE_GROUP', value: resourceGroup().name }
       { name: 'SQL_ADMIN_PASSWORD', secureValue: finalSqlAdminPassword }
     ]
-    
+
     scriptContent: '''
       #!/bin/bash
       set -euo pipefail
@@ -933,13 +921,13 @@ resource generateCertificateScript 'Microsoft.Resources/deploymentScripts@2023-0
     retentionInterval: 'P1D'
     timeout: 'PT10M'
     cleanupPreference: 'OnSuccess'
-    
+
     environmentVariables: [
       { name: 'KEYVAULT_NAME', value: keyVault.name }
       { name: 'DOMAIN_NAME', value: appGwPip.properties.dnsSettings.fqdn }
       { name: 'CERT_SECRET_NAME', value: 'appgw-ssl-cert' }
     ]
-    
+
     scriptContent: '''
       #!/bin/bash
       set -euo pipefail
@@ -1001,7 +989,7 @@ resource generateCertificateScript 'Microsoft.Resources/deploymentScripts@2023-0
       echo "[$(date)] Cleanup completed"
     '''
   }
-  
+
   dependsOn: [
     generateSecretsScript
   ]
@@ -1025,10 +1013,10 @@ resource sqlServer 'Microsoft.Sql/servers@2022-11-01-preview' = {
     // Admin credentials: Use secure password parameter
     administratorLogin: 'sqladmin'
     administratorLoginPassword: finalSqlAdminPassword
-    
+
     // Disable public network access - use Private Endpoint only
     publicNetworkAccess: 'Disabled'
-    
+
     // Require encrypted connections only
     minimalTlsVersion: '1.2'
   }
@@ -1068,7 +1056,7 @@ resource sqlServerAudit 'Microsoft.Sql/servers/auditingSettings@2022-11-01-previ
       'FAILED_DATABASE_AUTHENTICATION_GROUP'
       'BATCH_COMPLETED_GROUP'
     ]
-    retentionDays: 30
+    isAzureMonitorTargetEnabled: true
     isStorageSecondaryKeyInUse: false
   }
 }
@@ -1083,36 +1071,20 @@ resource sqlDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
       {
         category: 'SQLSecurityAuditEvents'
         enabled: true
-        retentionPolicy: {
-          enabled: true
-          days: logAnalyticsRetentionInDays
-        }
       }
       {
         category: 'Errors'
         enabled: true
-        retentionPolicy: {
-          enabled: true
-          days: logAnalyticsRetentionInDays
-        }
       }
       {
         category: 'DatabaseWaitStatistics'
         enabled: true
-        retentionPolicy: {
-          enabled: true
-          days: logAnalyticsRetentionInDays
-        }
       }
     ]
     metrics: [
       {
         category: 'Basic'
         enabled: true
-        retentionPolicy: {
-          enabled: true
-          days: logAnalyticsRetentionInDays
-        }
       }
     ]
   }
@@ -1183,7 +1155,6 @@ resource privateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneG
     ]
   }
 }
-
 
 // ==============================================================================
 // RESOURCES: KEY VAULT SECRETS (References to auto-generated values)
@@ -1321,22 +1292,22 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-03-01' = {
   name: vmName
   location: location
   tags: commonTags
-  
+
   // Managed Identity: VM automatically authenticated to Azure AD
   // No credentials need to be stored on the VM
   identity: {
     type: 'SystemAssigned'
   }
-  
+
   properties: {
     hardwareProfile: {
       vmSize: vmSku
     }
-    
+
     osProfile: {
       computerName: vmName
       adminUsername: adminUsername
-      
+
       // SSH public key auto-generated and stored in Key Vault
       // Retrieved at deployment time via Key Vault reference
       linuxConfiguration: {
@@ -1352,7 +1323,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-03-01' = {
         }
       }
     }
-    
+
     storageProfile: {
       imageReference: {
         publisher: 'Canonical'
@@ -1369,7 +1340,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-03-01' = {
         deleteOption: 'Delete'
       }
     }
-    
+
     networkProfile: {
       networkInterfaces: [
         {
@@ -1382,7 +1353,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-03-01' = {
       ]
     }
   }
-  
+
   dependsOn: []
 }
 
@@ -1396,10 +1367,6 @@ resource vmDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
       {
         category: 'AllMetrics'
         enabled: true
-        retentionPolicy: {
-          enabled: true
-          days: logAnalyticsRetentionInDays
-        }
       }
     ]
   }
@@ -1427,14 +1394,13 @@ resource vmExtension 'Microsoft.Compute/virtualMachines/extensions@2023-03-01' =
       commandToExecute: 'bash install.sh "${kvName}" "${sqlServer.properties.fullyQualifiedDomainName}" "${sqlDbName}" "${tenantId}"'
     }
   }
-  
+
   dependsOn: [
     roleAssignKvSecretsToVm
     sqlDb
     appGateway
   ]
 }
-
 
 // ==============================================================================
 // OUTPUTS - Deployment Information & Access Details
