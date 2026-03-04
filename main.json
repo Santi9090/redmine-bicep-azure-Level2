@@ -1,0 +1,1189 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.40.2.10011",
+      "templateHash": "3990867794135918327"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "The location for all resources. Defaults to resource group location."
+      }
+    },
+    "environmentName": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 20,
+      "metadata": {
+        "description": "The name of the environment (e.g. \"prod\", \"dev\", \"staging\")."
+      }
+    },
+    "vmSku": {
+      "type": "string",
+      "defaultValue": "Standard_B2s",
+      "metadata": {
+        "description": "The size of the VM. Defaults to Standard_B2s."
+      }
+    },
+    "sqlSku": {
+      "type": "string",
+      "defaultValue": "Basic",
+      "metadata": {
+        "description": "The SKU of the SQL Database. Defaults to Basic."
+      }
+    },
+    "adminIpAddress": {
+      "type": "string",
+      "metadata": {
+        "description": "IP Address range allowed for administrative access. CIDR format (e.g., 203.0.113.0/24)."
+      }
+    },
+    "adminUsername": {
+      "type": "string",
+      "defaultValue": "azureuser",
+      "metadata": {
+        "description": "Admin username for VM SSH access."
+      }
+    },
+    "installScriptUrl": {
+      "type": "string",
+      "defaultValue": "https://raw.githubusercontent.com/Santi9090/redmine-bicep-azure-Level2/main/redmine-bicepv2.sh",
+      "metadata": {
+        "description": "URL of the Redmine installation script. Must be publicly accessible."
+      }
+    },
+    "enableWaf": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Enable WAF on Application Gateway for production deployments."
+      }
+    },
+    "logAnalyticsRetentionInDays": {
+      "type": "int",
+      "defaultValue": 30,
+      "metadata": {
+        "description": "Retention days for Log Analytics diagnostics."
+      }
+    },
+    "sqlAdminPassword": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "SQL Server admin password. If not provided, a secure password will be auto-generated."
+      }
+    },
+    "entraClientId": {
+      "type": "string",
+      "metadata": {
+        "description": "Client ID of the Entra ID App Registration for OIDC authentication. Must be created manually in Azure Portal."
+      }
+    }
+  },
+  "variables": {
+    "tenantId": "[subscription().tenantId]",
+    "subscriptionId": "[subscription().subscriptionId]",
+    "uniqueSuffix": "[uniqueString(resourceGroup().id)]",
+    "kvName": "[format('kv{0}', replace(uniqueString(resourceGroup().id, parameters('environmentName')), '-', ''))]",
+    "vnetName": "[format('{0}-vnet', parameters('environmentName'))]",
+    "nsgName": "[format('{0}-nsg-vm', parameters('environmentName'))]",
+    "appGwName": "[format('{0}-appgw', parameters('environmentName'))]",
+    "appGwPipName": "[format('{0}-appgw-pip', parameters('environmentName'))]",
+    "vmName": "[format('{0}-vm', parameters('environmentName'))]",
+    "nicName": "[format('{0}-nic', parameters('environmentName'))]",
+    "sqlServerName": "[format('{0}-sql-{1}', parameters('environmentName'), variables('uniqueSuffix'))]",
+    "sqlDbName": "[format('{0}-redmine-db', parameters('environmentName'))]",
+    "logAnalyticsName": "[format('{0}-law-{1}', parameters('environmentName'), variables('uniqueSuffix'))]",
+    "deployIdentityName": "[format('{0}-deploy-identity', parameters('environmentName'))]",
+    "appGwIdentityName": "[format('{0}-appgw-identity', parameters('environmentName'))]",
+    "generateSecretScriptName": "[format('{0}-generate-secrets', parameters('environmentName'))]",
+    "generateCertScriptName": "[format('{0}-generate-cert', parameters('environmentName'))]",
+    "finalSqlAdminPassword": "[if(empty(parameters('sqlAdminPassword')), format('{0}#Sql2026!', uniqueString(subscription().id, resourceGroup().id, parameters('environmentName'))), parameters('sqlAdminPassword'))]",
+    "subnetAppGwName": "Subnet-AppGateway",
+    "subnetVmName": "Subnet-VM",
+    "subnetPrivateEndpointsName": "Subnet-PrivateEndpoints",
+    "vnetAddressSpace": "10.0.0.0/16",
+    "subnetAppGwPrefix": "10.0.0.0/24",
+    "subnetVmPrefix": "10.0.1.0/24",
+    "subnetPrivateEndpointsPrefix": "10.0.2.0/24",
+    "keyVaultSecretsUserRoleId": "4633458b-17de-408a-b874-0445c86b69e6",
+    "keyVaultAdminRoleId": "00482a5a-887f-4fb3-b363-3b7fe8e74483",
+    "commonTags": {
+      "environment": "[parameters('environmentName')]",
+      "createdBy": "Bicep",
+      "managedBy": "Infrastructure-as-Code",
+      "complianceFramework": "Zero-Trust"
+    }
+  },
+  "imports": {
+    "MicrosoftGraph": {
+      "provider": "MicrosoftGraph",
+      "version": "0.1.8-preview"
+    }
+  },
+  "resources": {
+    "logAnalytics": {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2022-10-01",
+      "name": "[variables('logAnalyticsName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": "[parameters('logAnalyticsRetentionInDays')]",
+        "publicNetworkAccessForIngestion": "Enabled",
+        "publicNetworkAccessForQuery": "Enabled"
+      }
+    },
+    "deployIdentity": {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2023-01-31",
+      "name": "[variables('deployIdentityName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]"
+    },
+    "appGwIdentity": {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2023-01-31",
+      "name": "[variables('appGwIdentityName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]"
+    },
+    "nsgVm": {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2023-04-01",
+      "name": "[variables('nsgName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "AllowAppGwInboundHttp",
+            "properties": {
+              "description": "Allow HTTP from App Gateway subnet only",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "80",
+              "access": "Allow",
+              "priority": 100,
+              "direction": "Inbound",
+              "sourceAddressPrefix": "[variables('subnetAppGwPrefix')]",
+              "destinationAddressPrefix": "*"
+            }
+          },
+          {
+            "name": "AllowSSHFromAdminIp",
+            "properties": {
+              "description": "Allow SSH from admin IP range only",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "22",
+              "access": "Allow",
+              "priority": 110,
+              "direction": "Inbound",
+              "sourceAddressPrefix": "[parameters('adminIpAddress')]",
+              "destinationAddressPrefix": "*"
+            }
+          },
+          {
+            "name": "DenyAllOtherInbound",
+            "properties": {
+              "description": "Deny all other inbound traffic (Zero Trust default)",
+              "protocol": "*",
+              "sourcePortRange": "*",
+              "destinationPortRange": "*",
+              "access": "Deny",
+              "priority": 4096,
+              "direction": "Inbound",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "*"
+            }
+          },
+          {
+            "name": "AllowDNSOutbound",
+            "properties": {
+              "description": "Allow DNS (UDP 53) for service resolution",
+              "protocol": "Udp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "53",
+              "access": "Allow",
+              "priority": 100,
+              "direction": "Outbound",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "*"
+            }
+          },
+          {
+            "name": "AllowHttpOutbound",
+            "properties": {
+              "description": "Allow HTTP outbound for package updates",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "80",
+              "access": "Allow",
+              "priority": 110,
+              "direction": "Outbound",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "Internet"
+            }
+          },
+          {
+            "name": "AllowHttpsOutbound",
+            "properties": {
+              "description": "Allow HTTPS outbound for secure updates and Key Vault",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "443",
+              "access": "Allow",
+              "priority": 120,
+              "direction": "Outbound",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "Internet"
+            }
+          }
+        ]
+      }
+    },
+    "nsgAppGw": {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2023-04-01",
+      "name": "[format('{0}-nsg-appgw', parameters('environmentName'))]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "AllowInternetInboundHttp",
+            "properties": {
+              "description": "Allow inbound HTTP traffic from Internet (port 80)",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "80",
+              "access": "Allow",
+              "priority": 100,
+              "direction": "Inbound",
+              "sourceAddressPrefix": "Internet",
+              "destinationAddressPrefix": "*"
+            }
+          },
+          {
+            "name": "AllowInternetInboundHttps",
+            "properties": {
+              "description": "Allow inbound HTTPS traffic from Internet (port 443)",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "443",
+              "access": "Allow",
+              "priority": 105,
+              "direction": "Inbound",
+              "sourceAddressPrefix": "Internet",
+              "destinationAddressPrefix": "*"
+            }
+          },
+          {
+            "name": "AllowGatewayManager",
+            "properties": {
+              "description": "Allow Azure Gateway Manager health probes (required for WAF v2)",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "65200-65535",
+              "access": "Allow",
+              "priority": 110,
+              "direction": "Inbound",
+              "sourceAddressPrefix": "GatewayManager",
+              "destinationAddressPrefix": "*"
+            }
+          },
+          {
+            "name": "DenyAllOtherInbound",
+            "properties": {
+              "description": "Deny all other inbound traffic",
+              "protocol": "*",
+              "sourcePortRange": "*",
+              "destinationPortRange": "*",
+              "access": "Deny",
+              "priority": 4096,
+              "direction": "Inbound",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "*"
+            }
+          }
+        ]
+      }
+    },
+    "vnet": {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2023-04-01",
+      "name": "[variables('vnetName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]",
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "[variables('vnetAddressSpace')]"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "[variables('subnetAppGwName')]",
+            "properties": {
+              "addressPrefix": "[variables('subnetAppGwPrefix')]",
+              "networkSecurityGroup": {
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-nsg-appgw', parameters('environmentName')))]"
+              }
+            }
+          },
+          {
+            "name": "[variables('subnetVmName')]",
+            "properties": {
+              "addressPrefix": "[variables('subnetVmPrefix')]",
+              "networkSecurityGroup": {
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+              }
+            }
+          },
+          {
+            "name": "[variables('subnetPrivateEndpointsName')]",
+            "properties": {
+              "addressPrefix": "[variables('subnetPrivateEndpointsPrefix')]",
+              "privateEndpointNetworkPolicies": "Disabled",
+              "privateLinkServiceNetworkPolicies": "Disabled"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "nsgAppGw",
+        "nsgVm"
+      ]
+    },
+    "nsgDiag": {
+      "type": "Microsoft.Insights/diagnosticSettings",
+      "apiVersion": "2021-05-01-preview",
+      "scope": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]",
+      "name": "nsg-flow-logs",
+      "properties": {
+        "workspaceId": "[resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsName'))]",
+        "logs": [
+          {
+            "category": "NetworkSecurityGroupEvent",
+            "enabled": true
+          },
+          {
+            "category": "NetworkSecurityGroupRuleCounter",
+            "enabled": true
+          }
+        ]
+      },
+      "dependsOn": [
+        "logAnalytics",
+        "nsgVm"
+      ]
+    },
+    "keyVault": {
+      "type": "Microsoft.KeyVault/vaults",
+      "apiVersion": "2023-02-01",
+      "name": "[variables('kvName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]",
+      "properties": {
+        "sku": {
+          "family": "A",
+          "name": "standard"
+        },
+        "tenantId": "[variables('tenantId')]",
+        "enableRbacAuthorization": true,
+        "enableSoftDelete": true,
+        "softDeleteRetentionInDays": 90,
+        "enablePurgeProtection": true,
+        "publicNetworkAccess": "Enabled",
+        "networkAcls": {
+          "defaultAction": "Allow",
+          "bypass": "AzureServices"
+        },
+        "enabledForDeployment": true,
+        "enabledForDiskEncryption": false,
+        "enabledForTemplateDeployment": true
+      }
+    },
+    "kvDiag": {
+      "type": "Microsoft.Insights/diagnosticSettings",
+      "apiVersion": "2021-05-01-preview",
+      "scope": "[resourceId('Microsoft.KeyVault/vaults', variables('kvName'))]",
+      "name": "[format('kv-diagnostics-{0}', variables('uniqueSuffix'))]",
+      "properties": {
+        "workspaceId": "[resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsName'))]",
+        "logs": [
+          {
+            "category": "AuditEvent",
+            "enabled": true
+          }
+        ],
+        "metrics": [
+          {
+            "category": "AllMetrics",
+            "enabled": true
+          }
+        ]
+      },
+      "dependsOn": [
+        "keyVault",
+        "logAnalytics"
+      ]
+    },
+    "roleAssignKvAdminToDeploy": {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.KeyVault/vaults', variables('kvName'))]",
+      "name": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('kvName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('deployIdentityName')), variables('keyVaultAdminRoleId'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('keyVaultAdminRoleId'))]",
+        "principalId": "[reference('deployIdentity').principalId]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "deployIdentity",
+        "keyVault"
+      ]
+    },
+    "roleAssignKvSecretsToVm": {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.KeyVault/vaults', variables('kvName'))]",
+      "name": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('kvName')), resourceId('Microsoft.Compute/virtualMachines', variables('vmName')), variables('keyVaultSecretsUserRoleId'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('keyVaultSecretsUserRoleId'))]",
+        "principalId": "[reference('vm', '2023-03-01', 'full').identity.principalId]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "keyVault",
+        "vm"
+      ]
+    },
+    "roleAssignKvSecretsToAppGw": {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.KeyVault/vaults', variables('kvName'))]",
+      "name": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('kvName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('appGwIdentityName')), variables('keyVaultSecretsUserRoleId'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('keyVaultSecretsUserRoleId'))]",
+        "principalId": "[reference('appGwIdentity').principalId]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "appGwIdentity",
+        "keyVault"
+      ]
+    },
+    "appGwPip": {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2023-04-01",
+      "name": "[variables('appGwPipName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]",
+      "sku": {
+        "name": "Standard",
+        "tier": "Regional"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static",
+        "idleTimeoutInMinutes": 4,
+        "dnsSettings": {
+          "domainNameLabel": "[toLower(format('{0}-{1}', parameters('environmentName'), variables('uniqueSuffix')))]"
+        }
+      }
+    },
+    "appGateway": {
+      "type": "Microsoft.Network/applicationGateways",
+      "apiVersion": "2023-04-01",
+      "name": "[variables('appGwName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[format('{0}', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('appGwIdentityName')))]": {}
+        }
+      },
+      "properties": {
+        "sku": {
+          "name": "WAF_v2",
+          "tier": "WAF_v2"
+        },
+        "sslCertificates": [
+          {
+            "name": "appGwSslCertFromKv",
+            "properties": {
+              "keyVaultSecretId": "[format('{0}secrets/appgw-ssl-cert', reference('keyVault').vaultUri)]"
+            }
+          }
+        ],
+        "gatewayIPConfigurations": [
+          {
+            "name": "appGatewayIpConfig",
+            "properties": {
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('subnetAppGwName'))]"
+              }
+            }
+          }
+        ],
+        "frontendIPConfigurations": [
+          {
+            "name": "appGatewayFrontendIP",
+            "properties": {
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('appGwPipName'))]"
+              }
+            }
+          }
+        ],
+        "frontendPorts": [
+          {
+            "name": "port_80",
+            "properties": {
+              "port": 80
+            }
+          },
+          {
+            "name": "port_443",
+            "properties": {
+              "port": 443
+            }
+          }
+        ],
+        "probes": [
+          {
+            "name": "redmineProbe",
+            "properties": {
+              "protocol": "Http",
+              "path": "/",
+              "interval": 30,
+              "timeout": 30,
+              "unhealthyThreshold": 3,
+              "pickHostNameFromBackendHttpSettings": true
+            }
+          }
+        ],
+        "backendAddressPools": [
+          {
+            "name": "redmineBackendPool",
+            "properties": {
+              "backendAddresses": []
+            }
+          }
+        ],
+        "backendHttpSettingsCollection": [
+          {
+            "name": "redmineHttpSettings",
+            "properties": {
+              "port": 80,
+              "protocol": "Http",
+              "cookieBasedAffinity": "Disabled",
+              "connectionDraining": {
+                "enabled": true,
+                "drainTimeoutInSec": 60
+              },
+              "requestTimeout": 20,
+              "probe": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/probes', variables('appGwName'), 'redmineProbe')]"
+              }
+            }
+          }
+        ],
+        "httpListeners": [
+          {
+            "name": "listener_80",
+            "properties": {
+              "frontendIPConfiguration": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/frontendIPConfigurations', variables('appGwName'), 'appGatewayFrontendIP')]"
+              },
+              "frontendPort": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/frontendPorts', variables('appGwName'), 'port_80')]"
+              },
+              "protocol": "Http",
+              "requireServerNameIndication": false
+            }
+          },
+          {
+            "name": "listener_443",
+            "properties": {
+              "frontendIPConfiguration": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/frontendIPConfigurations', variables('appGwName'), 'appGatewayFrontendIP')]"
+              },
+              "frontendPort": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/frontendPorts', variables('appGwName'), 'port_443')]"
+              },
+              "protocol": "Https",
+              "sslCertificate": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/sslCertificates', variables('appGwName'), 'appGwSslCertFromKv')]"
+              },
+              "requireServerNameIndication": false
+            }
+          }
+        ],
+        "requestRoutingRules": [
+          {
+            "name": "redirect_http_to_https",
+            "properties": {
+              "ruleType": "Basic",
+              "httpListener": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/httpListeners', variables('appGwName'), 'listener_80')]"
+              },
+              "redirectConfiguration": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/redirectConfigurations', variables('appGwName'), 'redirectConfigHttp')]"
+              },
+              "priority": 1
+            }
+          },
+          {
+            "name": "rule_secure_redmine",
+            "properties": {
+              "ruleType": "Basic",
+              "httpListener": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/httpListeners', variables('appGwName'), 'listener_443')]"
+              },
+              "backendAddressPool": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/backendAddressPools', variables('appGwName'), 'redmineBackendPool')]"
+              },
+              "backendHttpSettings": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/backendHttpSettingsCollection', variables('appGwName'), 'redmineHttpSettings')]"
+              },
+              "priority": 2
+            }
+          }
+        ],
+        "redirectConfigurations": [
+          {
+            "name": "redirectConfigHttp",
+            "properties": {
+              "redirectType": "Permanent",
+              "targetListener": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/httpListeners', variables('appGwName'), 'listener_443')]"
+              },
+              "includePath": true,
+              "includeQueryString": true
+            }
+          }
+        ],
+        "webApplicationFirewallConfiguration": {
+          "enabled": "[parameters('enableWaf')]",
+          "firewallMode": "Prevention",
+          "ruleSetType": "OWASP",
+          "ruleSetVersion": "3.2",
+          "disabledRuleGroups": [],
+          "fileUploadLimitInMb": 100,
+          "maxRequestBodySizeInKb": 128
+        },
+        "autoscaleConfiguration": {
+          "minCapacity": 1,
+          "maxCapacity": 3
+        }
+      },
+      "dependsOn": [
+        "appGwIdentity",
+        "appGwPip",
+        "generateCertificateScript",
+        "keyVault",
+        "roleAssignKvSecretsToAppGw",
+        "vnet"
+      ]
+    },
+    "appGwDiag": {
+      "type": "Microsoft.Insights/diagnosticSettings",
+      "apiVersion": "2021-05-01-preview",
+      "scope": "[resourceId('Microsoft.Network/applicationGateways', variables('appGwName'))]",
+      "name": "appgw-diagnostic-settings",
+      "properties": {
+        "workspaceId": "[resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsName'))]",
+        "logs": [
+          {
+            "category": "ApplicationGatewayAccessLog",
+            "enabled": true
+          },
+          {
+            "category": "ApplicationGatewayFirewallLog",
+            "enabled": true
+          },
+          {
+            "category": "ApplicationGatewayPerformanceLog",
+            "enabled": true
+          }
+        ],
+        "metrics": [
+          {
+            "category": "AllMetrics",
+            "enabled": true
+          }
+        ]
+      },
+      "dependsOn": [
+        "appGateway",
+        "logAnalytics"
+      ]
+    },
+    "generateSecretsScript": {
+      "type": "Microsoft.Resources/deploymentScripts",
+      "apiVersion": "2023-08-01",
+      "name": "[variables('generateSecretScriptName')]",
+      "location": "[parameters('location')]",
+      "kind": "AzureCLI",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[format('{0}', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('deployIdentityName')))]": {}
+        }
+      },
+      "properties": {
+        "azCliVersion": "2.52.0",
+        "retentionInterval": "P1D",
+        "timeout": "PT20M",
+        "cleanupPreference": "OnSuccess",
+        "environmentVariables": [
+          {
+            "name": "KEYVAULT_NAME",
+            "value": "[variables('kvName')]"
+          },
+          {
+            "name": "SUBSCRIPTION_ID",
+            "value": "[variables('subscriptionId')]"
+          },
+          {
+            "name": "RESOURCE_GROUP",
+            "value": "[resourceGroup().name]"
+          },
+          {
+            "name": "SQL_ADMIN_PASSWORD",
+            "secureValue": "[variables('finalSqlAdminPassword')]"
+          }
+        ],
+        "scriptContent": "      #!/bin/bash\r\n      set -euo pipefail\r\n      \r\n      echo \"[$(date)] Starting secret generation script...\"\r\n      \r\n      # Wait for RBAC propagation (can take up to 10 minutes)\r\n      echo \"[$(date)] Waiting for Key Vault RBAC permissions to propagate...\"\r\n      MAX_RETRIES=30\r\n      RETRY_INTERVAL=10\r\n      for i in $(seq 1 $MAX_RETRIES); do\r\n        if az keyvault secret list --vault-name \"$KEYVAULT_NAME\" --maxresults 1 &>/dev/null; then\r\n          echo \"[$(date)] Key Vault access confirmed on attempt $i.\"\r\n          break\r\n        fi\r\n        if [ \"$i\" -eq \"$MAX_RETRIES\" ]; then\r\n          echo \"[$(date)] ERROR: Key Vault access not available after $((MAX_RETRIES * RETRY_INTERVAL))s\" >&2\r\n          exit 1\r\n        fi\r\n        echo \"[$(date)] Waiting for RBAC propagation (attempt $i/$MAX_RETRIES)...\"\r\n        sleep $RETRY_INTERVAL\r\n      done\r\n      \r\n      # Function to check if secret exists\r\n      secret_exists() {\r\n        az keyvault secret show --vault-name \"$KEYVAULT_NAME\" --name \"$1\" &>/dev/null && echo \"true\" || echo \"false\"\r\n      }\r\n      \r\n      # Function to store secret (idempotent)\r\n      store_secret() {\r\n        local secret_name=$1\r\n        local secret_value=$2\r\n        \r\n        if [ \"$(secret_exists \"$secret_name\")\" = \"true\" ]; then\r\n          echo \"[$(date)] Secret '$secret_name' already exists. Skipping.\"\r\n          return 0\r\n        fi\r\n        \r\n        if az keyvault secret set \\\r\n          --vault-name \"$KEYVAULT_NAME\" \\\r\n          --name \"$secret_name\" \\\r\n          --value \"$secret_value\" > /dev/null 2>&1; then\r\n          echo \"[$(date)] ✓ Created secret: $secret_name\"\r\n        else\r\n          echo \"[$(date)] ✗ Failed to create secret: $secret_name\" >&2\r\n          return 1\r\n        fi\r\n      }\r\n      \r\n      echo \"[$(date)] === Generating Application Secrets ===\"\r\n      \r\n      # 1. SQL Admin Password (passed from Bicep template - pre-generated for consistency)\r\n      echo \"[$(date)] Storing SQL admin password in Key Vault...\"\r\n      store_secret \"sql-admin-password\" \"$SQL_ADMIN_PASSWORD\"\r\n      \r\n      # 2. Redmine Secret Key (Rails RAILS_MASTER_KEY format preferred, 32 bytes hex)\r\n      echo \"[$(date)] Generating Redmine secret key...\"\r\n      REDMINE_SECRET=$(openssl rand -hex 32)\r\n      store_secret \"redmine-secret-key\" \"$REDMINE_SECRET\"\r\n      \r\n      # 3. SSH Private Key (ED25519 format - modern, secure)\r\n      echo \"[$(date)] Generating SSH key pair...\"\r\n      ssh-keygen -t ed25519 -f /tmp/id_ed25519 -N \"\" -C \"redmine-admin@azure\" 2>/dev/null || true\r\n      SSH_PRIVATE_KEY=$(cat /tmp/id_ed25519 | base64 -w0)\r\n      SSH_PUBLIC_KEY=$(cat /tmp/id_ed25519.pub)\r\n      store_secret \"ssh-private-key\" \"$SSH_PRIVATE_KEY\"\r\n      store_secret \"ssh-public-key\" \"$SSH_PUBLIC_KEY\"\r\n      \r\n      # 4. Entra Client Secret (32 char alphanumeric)\r\n      echo \"[$(date)] Generating Entra client secret...\"\r\n      ENTRA_SECRET=$(openssl rand -base64 24 | tr -d \"=+/\")\r\n      store_secret \"entra-client-secret\" \"$ENTRA_SECRET\"\r\n      \r\n      # 5. Tenant ID (from context)\r\n      echo \"[$(date)] Retrieving Tenant ID...\"\r\n      TENANT_ID=$(az account show --query tenantId -o tsv)\r\n      store_secret \"tenant-id\" \"$TENANT_ID\"\r\n      \r\n      echo \"[$(date)] === All secrets generated and stored successfully ===\"\r\n\r\n      # Output SSH public key for VM resource to consume\r\n      # If the key already existed, retrieve it from Key Vault\r\n      if [ -z \"${SSH_PUBLIC_KEY:-}\" ]; then\r\n        SSH_PUBLIC_KEY=$(az keyvault secret show --vault-name \"$KEYVAULT_NAME\" --name \"ssh-public-key\" --query value -o tsv)\r\n      fi\r\n      echo \"{\\\"sshPublicKey\\\": \\\"$SSH_PUBLIC_KEY\\\"}\" > $AZ_SCRIPTS_OUTPUT_PATH\r\n    "
+      },
+      "dependsOn": [
+        "deployIdentity",
+        "keyVault"
+      ]
+    },
+    "generateCertificateScript": {
+      "type": "Microsoft.Resources/deploymentScripts",
+      "apiVersion": "2023-08-01",
+      "name": "[variables('generateCertScriptName')]",
+      "location": "[parameters('location')]",
+      "kind": "AzureCLI",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[format('{0}', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('deployIdentityName')))]": {}
+        }
+      },
+      "properties": {
+        "azCliVersion": "2.52.0",
+        "retentionInterval": "P1D",
+        "timeout": "PT10M",
+        "cleanupPreference": "OnSuccess",
+        "environmentVariables": [
+          {
+            "name": "KEYVAULT_NAME",
+            "value": "[variables('kvName')]"
+          },
+          {
+            "name": "DOMAIN_NAME",
+            "value": "[reference('appGwPip').dnsSettings.fqdn]"
+          },
+          {
+            "name": "CERT_SECRET_NAME",
+            "value": "appgw-ssl-cert"
+          }
+        ],
+        "scriptContent": "      #!/bin/bash\r\n      set -euo pipefail\r\n      \r\n      echo \"[$(date)] === Generating Self-Signed Certificate for Application Gateway ===\"\r\n      \r\n      # Check if certificate already exists in Key Vault\r\n      if az keyvault certificate show --vault-name \"$KEYVAULT_NAME\" --name \"$CERT_SECRET_NAME\" &>/dev/null; then\r\n        echo \"[$(date)] Certificate already exists in Key Vault. Skipping generation.\"\r\n        exit 0\r\n      fi\r\n      \r\n      # Generate private key and self-signed certificate\r\n      echo \"[$(date)] Generating RSA private key and self-signed certificate...\"\r\n      openssl req \\\r\n        -x509 \\\r\n        -newkey rsa:2048 \\\r\n        -keyout /tmp/server.key \\\r\n        -out /tmp/server.crt \\\r\n        -days 365 \\\r\n        -nodes \\\r\n        -subj \"/CN=$DOMAIN_NAME/O=RedmineDeploy/C=US\" 2>/dev/null || {\r\n        echo \"[$(date)] Error: Failed to generate certificate\" >&2\r\n        exit 1\r\n      }\r\n      \r\n      # Create PKCS#12 format (required by App Gateway)\r\n      echo \"[$(date)] Creating PKCS#12 format...\"\r\n      openssl pkcs12 \\\r\n        -export \\\r\n        -in /tmp/server.crt \\\r\n        -inkey /tmp/server.key \\\r\n        -out /tmp/server.pfx \\\r\n        -name \"appgw-cert\" \\\r\n        -passout pass:\"\" 2>/dev/null || {\r\n        echo \"[$(date)] Error: Failed to create PKCS#12 format\" >&2\r\n        exit 1\r\n      }\r\n      \r\n      # Import certificate into Key Vault as a proper certificate resource\r\n      # App Gateway requires certificates (not plain secrets) for SSL termination\r\n      echo \"[$(date)] Importing certificate into Key Vault...\"\r\n      az keyvault certificate import \\\r\n        --vault-name \"$KEYVAULT_NAME\" \\\r\n        --name \"$CERT_SECRET_NAME\" \\\r\n        --file /tmp/server.pfx \\\r\n        --password \"\" > /dev/null || {\r\n        echo \"[$(date)] Error: Failed to import certificate into Key Vault\" >&2\r\n        exit 1\r\n      }\r\n      \r\n      echo \"[$(date)] ✓ Self-signed certificate generated and imported successfully\"\r\n      \r\n      # Cleanup temp files\r\n      rm -f /tmp/server.key /tmp/server.crt /tmp/server.pfx\r\n      echo \"[$(date)] Cleanup completed\"\r\n    "
+      },
+      "dependsOn": [
+        "appGwPip",
+        "deployIdentity",
+        "generateSecretsScript",
+        "keyVault"
+      ]
+    },
+    "sqlServer": {
+      "type": "Microsoft.Sql/servers",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[variables('sqlServerName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "administratorLogin": "sqladmin",
+        "administratorLoginPassword": "[variables('finalSqlAdminPassword')]",
+        "publicNetworkAccess": "Disabled",
+        "minimalTlsVersion": "1.2"
+      }
+    },
+    "sqlDb": {
+      "type": "Microsoft.Sql/servers/databases",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[format('{0}/{1}', variables('sqlServerName'), variables('sqlDbName'))]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]",
+      "sku": {
+        "name": "[parameters('sqlSku')]"
+      },
+      "properties": {
+        "collation": "SQL_Latin1_General_CP1_CI_AS",
+        "requestedBackupStorageRedundancy": "Geo"
+      },
+      "dependsOn": [
+        "sqlServer"
+      ]
+    },
+    "sqlDbTde": {
+      "type": "Microsoft.Sql/servers/databases/transparentDataEncryption",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[format('{0}/{1}/{2}', variables('sqlServerName'), variables('sqlDbName'), 'current')]",
+      "properties": {
+        "state": "Enabled"
+      },
+      "dependsOn": [
+        "sqlDb"
+      ]
+    },
+    "sqlServerAudit": {
+      "type": "Microsoft.Sql/servers/auditingSettings",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[format('{0}/{1}', variables('sqlServerName'), 'default')]",
+      "properties": {
+        "state": "Enabled",
+        "auditActionsAndGroups": [
+          "SUCCESSFUL_DATABASE_AUTHENTICATION_GROUP",
+          "FAILED_DATABASE_AUTHENTICATION_GROUP",
+          "BATCH_COMPLETED_GROUP"
+        ],
+        "isAzureMonitorTargetEnabled": true,
+        "isStorageSecondaryKeyInUse": false
+      },
+      "dependsOn": [
+        "sqlServer"
+      ]
+    },
+    "sqlDiag": {
+      "type": "Microsoft.Insights/diagnosticSettings",
+      "apiVersion": "2021-05-01-preview",
+      "scope": "[resourceId('Microsoft.Sql/servers/databases', variables('sqlServerName'), variables('sqlDbName'))]",
+      "name": "sql-diagnostic-settings",
+      "properties": {
+        "workspaceId": "[resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsName'))]",
+        "logs": [
+          {
+            "category": "SQLSecurityAuditEvents",
+            "enabled": true
+          },
+          {
+            "category": "Errors",
+            "enabled": true
+          },
+          {
+            "category": "DatabaseWaitStatistics",
+            "enabled": true
+          }
+        ],
+        "metrics": [
+          {
+            "category": "Basic",
+            "enabled": true
+          }
+        ]
+      },
+      "dependsOn": [
+        "logAnalytics",
+        "sqlDb"
+      ]
+    },
+    "privateEndpointSql": {
+      "type": "Microsoft.Network/privateEndpoints",
+      "apiVersion": "2023-04-01",
+      "name": "[format('{0}-sql-pe', parameters('environmentName'))]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]",
+      "properties": {
+        "subnet": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('subnetPrivateEndpointsName'))]"
+        },
+        "privateLinkServiceConnections": [
+          {
+            "name": "[format('{0}-sql-plsc', parameters('environmentName'))]",
+            "properties": {
+              "privateLinkServiceId": "[resourceId('Microsoft.Sql/servers', variables('sqlServerName'))]",
+              "groupIds": [
+                "sqlServer"
+              ],
+              "requestMessage": "Please approve this connection"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "sqlServer",
+        "vnet"
+      ]
+    },
+    "privateDnsZone": {
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2020-06-01",
+      "name": "privatelink.database.windows.net",
+      "location": "global",
+      "tags": "[variables('commonTags')]"
+    },
+    "privateDnsZoneLink": {
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2020-06-01",
+      "name": "[format('{0}/{1}', 'privatelink.database.windows.net', format('{0}-link', variables('vnetName')))]",
+      "location": "global",
+      "properties": {
+        "registrationEnabled": false,
+        "virtualNetwork": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+        }
+      },
+      "dependsOn": [
+        "privateDnsZone",
+        "vnet"
+      ]
+    },
+    "privateDnsZoneGroup": {
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2023-04-01",
+      "name": "[format('{0}/{1}', format('{0}-sql-pe', parameters('environmentName')), 'default')]",
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "privatelink.database.windows.net",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.database.windows.net')]"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "privateDnsZone",
+        "privateEndpointSql"
+      ]
+    },
+    "nic": {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2023-04-01",
+      "name": "[variables('nicName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]",
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('subnetVmName'))]"
+              },
+              "applicationGatewayBackendAddressPools": [
+                {
+                  "id": "[resourceId('Microsoft.Network/applicationGateways/backendAddressPools', variables('appGwName'), 'redmineBackendPool')]"
+                }
+              ]
+            }
+          }
+        ],
+        "networkSecurityGroup": {
+          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+        }
+      },
+      "dependsOn": [
+        "appGateway",
+        "nsgVm",
+        "vnet"
+      ]
+    },
+    "vm": {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2023-03-01",
+      "name": "[variables('vmName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('commonTags')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSku')]"
+        },
+        "osProfile": {
+          "computerName": "[variables('vmName')]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "linuxConfiguration": {
+            "disablePasswordAuthentication": true,
+            "ssh": {
+              "publicKeys": [
+                {
+                  "path": "[format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername'))]",
+                  "keyData": "[reference('generateSecretsScript').outputs.sshPublicKey]"
+                }
+              ]
+            }
+          }
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "Canonical",
+            "offer": "0001-com-ubuntu-server-jammy",
+            "sku": "22_04-lts-gen2",
+            "version": "latest"
+          },
+          "osDisk": {
+            "createOption": "FromImage",
+            "managedDisk": {
+              "storageAccountType": "Premium_LRS"
+            },
+            "deleteOption": "Delete"
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]",
+              "properties": {
+                "deleteOption": "Detach",
+                "primary": true
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "generateSecretsScript",
+        "nic"
+      ]
+    },
+    "vmDiag": {
+      "type": "Microsoft.Insights/diagnosticSettings",
+      "apiVersion": "2021-05-01-preview",
+      "scope": "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName'))]",
+      "name": "vm-diagnostic-settings",
+      "properties": {
+        "workspaceId": "[resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsName'))]",
+        "metrics": [
+          {
+            "category": "AllMetrics",
+            "enabled": true
+          }
+        ]
+      },
+      "dependsOn": [
+        "logAnalytics",
+        "vm"
+      ]
+    },
+    "vmExtension": {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2023-03-01",
+      "name": "[format('{0}/{1}', variables('vmName'), 'install-redmine')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "publisher": "Microsoft.Azure.Extensions",
+        "type": "CustomScript",
+        "typeHandlerVersion": "2.1",
+        "autoUpgradeMinorVersion": true,
+        "protectedSettings": {
+          "fileUris": [
+            "[parameters('installScriptUrl')]"
+          ],
+          "commandToExecute": "[format('bash redmine-bicepv2.sh \"{0}\" \"{1}\" \"{2}\" \"{3}\" \"{4}\" \"{5}\"', variables('kvName'), reference('sqlServer').fullyQualifiedDomainName, variables('sqlDbName'), variables('tenantId'), parameters('entraClientId'), reference('appGwPip').dnsSettings.fqdn)]"
+        }
+      },
+      "dependsOn": [
+        "appGateway",
+        "appGwPip",
+        "privateDnsZoneGroup",
+        "privateDnsZoneLink",
+        "roleAssignKvSecretsToVm",
+        "sqlDb",
+        "sqlServer",
+        "vm"
+      ]
+    }
+  },
+  "outputs": {
+    "deploymentSummary": {
+      "type": "object",
+      "value": {
+        "message": "Deployment completed successfully. All secrets are stored in Key Vault.",
+        "environment": "[parameters('environmentName')]",
+        "region": "[parameters('location')]"
+      }
+    },
+    "appGatewayPublicUrl": {
+      "type": "string",
+      "value": "[format('https://{0}', reference('appGwPip').dnsSettings.fqdn)]"
+    },
+    "appGatewayFqdn": {
+      "type": "string",
+      "value": "[reference('appGwPip').dnsSettings.fqdn]"
+    },
+    "sqlServerFqdn": {
+      "type": "string",
+      "value": "[reference('sqlServer').fullyQualifiedDomainName]"
+    },
+    "keyVaultName": {
+      "type": "string",
+      "value": "[variables('kvName')]"
+    },
+    "keyVaultId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.KeyVault/vaults', variables('kvName'))]"
+    },
+    "tenantId": {
+      "type": "string",
+      "value": "[variables('tenantId')]"
+    },
+    "environmentName": {
+      "type": "string",
+      "value": "[parameters('environmentName')]"
+    },
+    "vmName": {
+      "type": "string",
+      "value": "[variables('vmName')]"
+    },
+    "vmResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName'))]"
+    },
+    "redmineDbName": {
+      "type": "string",
+      "value": "[variables('sqlDbName')]"
+    },
+    "accessInstructions": {
+      "type": "object",
+      "value": {
+        "ssh": "[format('ssh -i <private-key-from-keyvault> {0}@{1}', parameters('adminUsername'), reference('vm').osProfile.computerName)]",
+        "keyVaultSecrets": [
+          "sql-admin-password",
+          "redmine-secret-key",
+          "ssh-private-key",
+          "ssh-public-key",
+          "entra-client-secret",
+          "entra-client-id",
+          "appgw-ssl-cert"
+        ],
+        "nextSteps": "Download certificates and keys from Key Vault. Never share or commit to source control."
+      }
+    }
+  }
+}
