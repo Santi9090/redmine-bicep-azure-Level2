@@ -117,6 +117,7 @@ apt-get install -y \
   libffi-dev \
   libpq-dev \
   nodejs \
+  npm \
   nginx \
   ruby-full \
   ruby-dev \
@@ -316,11 +317,18 @@ cat <<'EOF' > Gemfile.local
 gem 'tiny_tds'
 gem 'activerecord-sqlserver-adapter'
 gem 'omniauth-openid-connect'
+gem 'puma'
 EOF
 
 echo "  -> Instalando gemas de Ruby (bundle install)..."
-bundle config set --local without 'development test'
-bundle install
+sudo -u redmine bundle config set --local without 'development test'
+
+# Crear directorios requeridos por Rails antes de bundle/rake
+mkdir -p log tmp/pids tmp/sockets tmp/cache public/plugin_assets
+chown -R redmine:redmine /opt/redmine
+
+# Ejecutar bundle install como usuario redmine para evitar archivos propiedad de root
+sudo -u redmine bundle install
 echo "  -> Gemas instaladas correctamente."
 
 #############################################
@@ -417,7 +425,7 @@ require 'tiny_tds'
 begin
   client = TinyTds::Client.new(
     username: 'sqladmin',
-    password: '$(cat "${DATABASE_YML}" | grep password | awk -F'\"' '{print $2}')',
+    password: '${SQL_PASSWORD}',
     host: '${SQL_FQDN}',
     database: '${DB_NAME}',
     timeout: 10
@@ -441,9 +449,9 @@ if [[ "${DB_CONNECT_CHECK}" != "OK" ]]; then
 fi
 echo "  -> Conectividad con Azure SQL verificada correctamente."
 
-# Ejecutar migraciones de base de datos
+# Ejecutar migraciones de base de datos como usuario redmine
 echo "  -> Ejecutando migraciones de base de datos..."
-bundle exec rake db:migrate RAILS_ENV=production
+sudo -u redmine bundle exec rake db:migrate RAILS_ENV=production
 echo "  -> Migraciones de base de datos completadas."
 
 # Por qué ejecutar migraciones de plugins:
@@ -451,7 +459,7 @@ echo "  -> Migraciones de base de datos completadas."
 #   de datos. Si no se ejecuta esta migración, las tablas del plugin OIDC
 #   no existirán y la autenticación fallará en tiempo de ejecución.
 echo "  -> Ejecutando migraciones de plugins..."
-bundle exec rake redmine:plugins:migrate RAILS_ENV=production
+sudo -u redmine bundle exec rake redmine:plugins:migrate RAILS_ENV=production
 echo "  -> Migraciones de plugins completadas."
 
 #############################################
@@ -599,7 +607,7 @@ environment 'production'
 threads 0, 5
 workers 2
 preload_app!
-port 3000, '127.0.0.1'
+bind 'tcp://127.0.0.1:3000'
 EOF
 
 # Unit de systemd para el servicio Redmine
@@ -631,15 +639,21 @@ systemctl enable redmine
 echo "  -> Reiniciando servicio redmine..."
 systemctl restart redmine
 
-# Verificar que el servicio quedó activo tras el reinicio
-sleep 3
-if ! systemctl is-active --quiet redmine; then
-  echo "ERROR: El servicio 'redmine' no está activo después del reinicio." >&2
-  echo "       Estado actual:" >&2
-  systemctl status redmine --no-pager >&2
-  exit 1
-fi
-echo "  -> Servicio 'redmine' activo y funcionando correctamente."
+# Verificar que el servicio quedó activo tras el reinicio (con reintentos)
+MAX_WAIT=15
+for i in $(seq 1 $MAX_WAIT); do
+  if systemctl is-active --quiet redmine; then
+    echo "  -> Servicio 'redmine' activo y funcionando correctamente."
+    break
+  fi
+  if [ "$i" -eq "$MAX_WAIT" ]; then
+    echo "ERROR: El servicio 'redmine' no está activo después de ${MAX_WAIT}s de espera." >&2
+    echo "       Estado actual:" >&2
+    systemctl status redmine --no-pager >&2
+    exit 1
+  fi
+  sleep 1
+done
 
 #############################################
 # SECCIÓN 9 – CONFIGURACIÓN DE NGINX

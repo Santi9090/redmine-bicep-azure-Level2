@@ -41,6 +41,9 @@ param logAnalyticsRetentionInDays int = 30
 @description('SQL Server admin password. If not provided, a secure password will be auto-generated.')
 @secure()
 param sqlAdminPassword string = ''
+
+@description('Client ID of the Entra ID App Registration for OIDC authentication. Must be created manually in Azure Portal.')
+param entraClientId string
 // ==============================================================================
 // VARIABLES - DERIVED FROM PARAMETERS (NO SECRETS)
 // ==============================================================================
@@ -62,7 +65,6 @@ var nicName = '${environmentName}-nic'
 var sqlServerName = '${environmentName}-sql-${uniqueSuffix}'
 var sqlDbName = '${environmentName}-redmine-db'
 var logAnalyticsName = '${environmentName}-law-${uniqueSuffix}'
-var appRegistrationName = '${environmentName}-redmine-app'
 var deployIdentityName = '${environmentName}-deploy-identity'
 var appGwIdentityName = '${environmentName}-appgw-identity'
 
@@ -207,7 +209,7 @@ resource nsgVm 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
       {
         name: 'AllowHttpOutbound'
         properties: {
-          description: 'Allow HTTP to AzureCloud for package updates'
+          description: 'Allow HTTP outbound for package updates'
           protocol: 'Tcp'
           sourcePortRange: '*'
           destinationPortRange: '80'
@@ -215,13 +217,13 @@ resource nsgVm 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
           priority: 110
           direction: 'Outbound'
           sourceAddressPrefix: '*'
-          destinationAddressPrefix: 'AzureCloud'
+          destinationAddressPrefix: 'Internet'
         }
       }
       {
         name: 'AllowHttpsOutbound'
         properties: {
-          description: 'Allow HTTPS to AzureCloud for secure updates'
+          description: 'Allow HTTPS outbound for secure updates and Key Vault'
           protocol: 'Tcp'
           sourcePortRange: '*'
           destinationPortRange: '443'
@@ -229,7 +231,7 @@ resource nsgVm 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
           priority: 120
           direction: 'Outbound'
           sourceAddressPrefix: '*'
-          destinationAddressPrefix: 'AzureCloud'
+          destinationAddressPrefix: 'Internet'
         }
       }
     ]
@@ -511,7 +513,7 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
       {
         name: 'appGwSslCertFromKv'
         properties: {
-          keyVaultSecretId: '${keyVault.properties.vaultUri}secrets/${secretAppGwCert.name}'
+          keyVaultSecretId: '${keyVault.properties.vaultUri}secrets/appgw-ssl-cert'
         }
       }
     ]
@@ -562,7 +564,7 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
           interval: 30
           timeout: 30
           unhealthyThreshold: 3
-          host: 'localhost'
+          pickHostNameFromBackendHttpSettings: true
         }
       }
     ]
@@ -754,8 +756,7 @@ resource appGwDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = 
 // 4. Set the redirect URI to: https://<app-gateway-fqdn>/auth/oidc/callback
 // This resource is commented out due to deployment identity lacking Graph.Application permissions
 
-// Placeholder output for app registration - replace with actual App ID after manual creation
-var entraClientIdPlaceholder = appRegistrationName // Update after manual app registration creation
+// The entraClientId parameter must be set by the user after manual App Registration creation
 
 // ==============================================================================
 // RESOURCES: SECRET GENERATION (Deployment-Time Automation)
@@ -793,6 +794,23 @@ resource generateSecretsScript 'Microsoft.Resources/deploymentScripts@2023-08-01
       set -euo pipefail
       
       echo "[$(date)] Starting secret generation script..."
+      
+      # Wait for RBAC propagation (can take up to 10 minutes)
+      echo "[$(date)] Waiting for Key Vault RBAC permissions to propagate..."
+      MAX_RETRIES=30
+      RETRY_INTERVAL=10
+      for i in $(seq 1 $MAX_RETRIES); do
+        if az keyvault secret list --vault-name "$KEYVAULT_NAME" --maxresults 1 &>/dev/null; then
+          echo "[$(date)] Key Vault access confirmed on attempt $i."
+          break
+        fi
+        if [ "$i" -eq "$MAX_RETRIES" ]; then
+          echo "[$(date)] ERROR: Key Vault access not available after $((MAX_RETRIES * RETRY_INTERVAL))s" >&2
+          exit 1
+        fi
+        echo "[$(date)] Waiting for RBAC propagation (attempt $i/$MAX_RETRIES)..."
+        sleep $RETRY_INTERVAL
+      done
       
       # Function to check if secret exists
       secret_exists() {
@@ -850,12 +868,13 @@ resource generateSecretsScript 'Microsoft.Resources/deploymentScripts@2023-08-01
       store_secret "tenant-id" "$TENANT_ID"
       
       echo "[$(date)] === All secrets generated and stored successfully ==="
-      echo "[$(date)] ✓ sql-admin-password"
-      echo "[$(date)] ✓ redmine-secret-key"
-      echo "[$(date)] ✓ ssh-private-key (base64 encoded)"
-      echo "[$(date)] ✓ ssh-public-key"
-      echo "[$(date)] ✓ entra-client-secret"
-      echo "[$(date)] ✓ tenant-id"
+
+      # Output SSH public key for VM resource to consume
+      # If the key already existed, retrieve it from Key Vault
+      if [ -z "${SSH_PUBLIC_KEY:-}" ]; then
+        SSH_PUBLIC_KEY=$(az keyvault secret show --vault-name "$KEYVAULT_NAME" --name "ssh-public-key" --query value -o tsv)
+      fi
+      echo "{\"sshPublicKey\": \"$SSH_PUBLIC_KEY\"}" > $AZ_SCRIPTS_OUTPUT_PATH
     '''
   }
 }
@@ -934,14 +953,13 @@ resource generateCertificateScript 'Microsoft.Resources/deploymentScripts@2023-0
       
       echo "[$(date)] === Generating Self-Signed Certificate for Application Gateway ==="
       
-      # Check if certificate already exists
-      if az keyvault secret show --vault-name "$KEYVAULT_NAME" --name "$CERT_SECRET_NAME" &>/dev/null; then
-        echo "[$(date)] Certificate already exists. Skipping generation."
+      # Check if certificate already exists in Key Vault
+      if az keyvault certificate show --vault-name "$KEYVAULT_NAME" --name "$CERT_SECRET_NAME" &>/dev/null; then
+        echo "[$(date)] Certificate already exists in Key Vault. Skipping generation."
         exit 0
       fi
       
       # Generate private key and self-signed certificate
-      # Valid for 1 year, can be replaced with real cert later
       echo "[$(date)] Generating RSA private key and self-signed certificate..."
       openssl req \
         -x509 \
@@ -968,21 +986,19 @@ resource generateCertificateScript 'Microsoft.Resources/deploymentScripts@2023-0
         exit 1
       }
       
-      # Base64 encode the PFX for Key Vault storage
-      echo "[$(date)] Encoding certificate for Key Vault..."
-      PFX_BASE64=$(cat /tmp/server.pfx | base64 -w0)
-      
-      # Store in Key Vault (as secret because Key Vault has native cert support)
-      echo "[$(date)] Storing certificate in Key Vault..."
-      az keyvault secret set \
+      # Import certificate into Key Vault as a proper certificate resource
+      # App Gateway requires certificates (not plain secrets) for SSL termination
+      echo "[$(date)] Importing certificate into Key Vault..."
+      az keyvault certificate import \
         --vault-name "$KEYVAULT_NAME" \
         --name "$CERT_SECRET_NAME" \
-        --value "$PFX_BASE64" > /dev/null || {
-        echo "[$(date)] Error: Failed to store certificate in Key Vault" >&2
+        --file /tmp/server.pfx \
+        --password "" > /dev/null || {
+        echo "[$(date)] Error: Failed to import certificate into Key Vault" >&2
         exit 1
       }
       
-      echo "[$(date)] ✓ Self-signed certificate generated and stored successfully"
+      echo "[$(date)] ✓ Self-signed certificate generated and imported successfully"
       
       # Cleanup temp files
       rm -f /tmp/server.key /tmp/server.crt /tmp/server.pfx
@@ -1157,92 +1173,11 @@ resource privateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneG
 }
 
 // ==============================================================================
-// RESOURCES: KEY VAULT SECRETS (References to auto-generated values)
+// NOTE: All secrets are created by deployment scripts (generateSecretsScript,
+// generateCertificateScript). No placeholder secret resources are needed here.
+// Placeholder resources with value 'PLACEHOLDER' would OVERWRITE the real secrets
+// created by the scripts, causing authentication and SSH failures.
 // ==============================================================================
-// These secrets are created by deployment scripts above.
-// We reference them here to establish deployment dependencies.
-
-// Secret placeholder resources that the deployment scripts will populate
-// These follow the "Idempotent Creation" pattern - scripts check if they exist before creating
-
-resource secretSqlAdmin 'Microsoft.KeyVault/vaults/secrets@2023-02-01' = {
-  parent: keyVault
-  name: 'sql-admin-password'
-  properties: {
-    value: 'PLACEHOLDER' // Will be replaced by deployment script
-  }
-  dependsOn: [
-    generateSecretsScript
-  ]
-}
-
-resource secretRedmineKey 'Microsoft.KeyVault/vaults/secrets@2023-02-01' = {
-  parent: keyVault
-  name: 'redmine-secret-key'
-  properties: {
-    value: 'PLACEHOLDER' // Will be replaced by deployment script
-  }
-  dependsOn: [
-    generateSecretsScript
-  ]
-}
-
-resource secretSshPrivate 'Microsoft.KeyVault/vaults/secrets@2023-02-01' = {
-  parent: keyVault
-  name: 'ssh-private-key'
-  properties: {
-    value: 'PLACEHOLDER' // Will be replaced by deployment script
-    contentType: 'application/octet-stream'
-  }
-  dependsOn: [
-    generateSecretsScript
-  ]
-}
-
-resource secretSshPublic 'Microsoft.KeyVault/vaults/secrets@2023-02-01' = {
-  parent: keyVault
-  name: 'ssh-public-key'
-  properties: {
-    value: 'PLACEHOLDER' // Will be replaced by deployment script
-    contentType: 'text/plain'
-  }
-  dependsOn: [
-    generateSecretsScript
-  ]
-}
-
-// Entra Client ID secret - Store the actual Client ID after manual app registration creation
-// Un-comment and update the value after creating the app registration manually
-// resource secretEntraClientId 'Microsoft.KeyVault/vaults/secrets@2023-02-01' = {
-//   parent: keyVault
-//   name: 'entra-client-id'
-//   properties: {
-//     value: '<YOUR_APP_REGISTRATION_CLIENT_ID>'
-//   }
-// }
-
-resource secretEntraClientSecret 'Microsoft.KeyVault/vaults/secrets@2023-02-01' = {
-  parent: keyVault
-  name: 'entra-client-secret'
-  properties: {
-    value: 'PLACEHOLDER' // Will be replaced by deployment script
-  }
-  dependsOn: [
-    generateSecretsScript
-  ]
-}
-
-resource secretAppGwCert 'Microsoft.KeyVault/vaults/secrets@2023-02-01' = {
-  parent: keyVault
-  name: 'appgw-ssl-cert'
-  properties: {
-    value: 'PLACEHOLDER' // Will be replaced by deployment script
-    contentType: 'application/x-pkcs12'
-  }
-  dependsOn: [
-    generateCertificateScript
-  ]
-}
 
 // ==============================================================================
 // RESOURCES: VIRTUAL MACHINE (Linux with Auto-Generated SSH Keys)
@@ -1316,8 +1251,8 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-03-01' = {
           publicKeys: [
             {
               path: '/home/${adminUsername}/.ssh/authorized_keys'
-              // SSH public key from Key Vault
-              keyData: secretSshPublic.properties.value
+              // SSH public key from deployment script output
+              keyData: generateSecretsScript.properties.outputs.sshPublicKey
             }
           ]
         }
@@ -1353,8 +1288,6 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-03-01' = {
       ]
     }
   }
-
-  dependsOn: []
 }
 
 // Diagnostic settings for VM
@@ -1374,7 +1307,7 @@ resource vmDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
 
 // Custom Script Extension: Download and execute Redmine installation script
 // The script will authenticate to Key Vault using the VM's Managed Identity
-// No credentials passed as parameters - only Key Vault name is provided
+// Arguments: KEY_VAULT_NAME SQL_FQDN DB_NAME TENANT_ID CLIENT_ID APPGW_FQDN
 resource vmExtension 'Microsoft.Compute/virtualMachines/extensions@2023-03-01' = {
   parent: vm
   name: 'install-redmine'
@@ -1385,13 +1318,11 @@ resource vmExtension 'Microsoft.Compute/virtualMachines/extensions@2023-03-01' =
     typeHandlerVersion: '2.1'
     autoUpgradeMinorVersion: true
     protectedSettings: {
-      // Download script from public GitHub repo
       fileUris: [
         installScriptUrl
       ]
-      // Command executed with access to the environment variables and MSI token
-      // NOTE: appReg.appId must be retrieved from Key Vault (entra-client-id) by the install script
-      commandToExecute: 'bash install.sh "${kvName}" "${sqlServer.properties.fullyQualifiedDomainName}" "${sqlDbName}" "${tenantId}"'
+      // All 6 arguments required by redmine-bicepv2.sh
+      commandToExecute: 'bash redmine-bicepv2.sh "${kvName}" "${sqlServer.properties.fullyQualifiedDomainName}" "${sqlDbName}" "${tenantId}" "${entraClientId}" "${appGwPip.properties.dnsSettings.fqdn}"'
     }
   }
 
@@ -1399,6 +1330,8 @@ resource vmExtension 'Microsoft.Compute/virtualMachines/extensions@2023-03-01' =
     roleAssignKvSecretsToVm
     sqlDb
     appGateway
+    privateDnsZoneLink
+    privateDnsZoneGroup
   ]
 }
 
@@ -1426,7 +1359,7 @@ output keyVaultId string = keyVault.id
 
 output tenantId string = tenantId
 
-output enviromentName string = environmentName
+output environmentName string = environmentName
 
 // output appRegistrationClientId string = appReg.appId  // Create app registration manually and retrieve Client ID from Azure Portal
 
