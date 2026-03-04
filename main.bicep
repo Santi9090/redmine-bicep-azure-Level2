@@ -42,8 +42,12 @@ param logAnalyticsRetentionInDays int = 30
 @secure()
 param sqlAdminPassword string = ''
 
-@description('Client ID of the Entra ID App Registration for OIDC authentication. Must be created manually in Azure Portal.')
+@description('Client ID of the Entra ID App Registration for OIDC authentication.')
 param entraClientId string
+
+@description('Client Secret of the Entra ID App Registration for OIDC authentication.')
+@secure()
+param entraClientSecret string
 // ==============================================================================
 // VARIABLES - DERIVED FROM PARAMETERS (NO SECRETS)
 // ==============================================================================
@@ -787,6 +791,8 @@ resource generateSecretsScript 'Microsoft.Resources/deploymentScripts@2023-08-01
       { name: 'SUBSCRIPTION_ID', value: subscriptionId }
       { name: 'RESOURCE_GROUP', value: resourceGroup().name }
       { name: 'SQL_ADMIN_PASSWORD', secureValue: finalSqlAdminPassword }
+      { name: 'ENTRA_CLIENT_ID', value: entraClientId }
+      { name: 'ENTRA_CLIENT_SECRET', secureValue: entraClientSecret }
     ]
 
     scriptContent: '''
@@ -857,10 +863,10 @@ resource generateSecretsScript 'Microsoft.Resources/deploymentScripts@2023-08-01
       store_secret "ssh-private-key" "$SSH_PRIVATE_KEY"
       store_secret "ssh-public-key" "$SSH_PUBLIC_KEY"
       
-      # 4. Entra Client Secret (32 char alphanumeric)
-      echo "[$(date)] Generating Entra client secret..."
-      ENTRA_SECRET=$(openssl rand -base64 24 | tr -d "=+/")
-      store_secret "entra-client-secret" "$ENTRA_SECRET"
+      # 4. Entra Client Secret & ID (Injected securely from parameters)
+      echo "[$(date)] Storing Entra ID credentials..."
+      store_secret "entra-client-id" "$ENTRA_CLIENT_ID"
+      store_secret "entra-client-secret" "$ENTRA_CLIENT_SECRET"
       
       # 5. Tenant ID (from context)
       echo "[$(date)] Retrieving Tenant ID..."
@@ -879,50 +885,10 @@ resource generateSecretsScript 'Microsoft.Resources/deploymentScripts@2023-08-01
   }
 }
 
-// ===== STEP 2: Configure Entra App Registration with auto-generated secret =====
-// NOTE: Entra App Registration configuration script is disabled due to deployment identity
-// lacking Graph.Application permissions. This script would normally:
-// 1. Get the APP_ID from the manually created app registration
-// 2. Store it in Key Vault for the VM to consume
-// 3. Add the client secret to Entra ID
-// 
-// MANUAL SETUP REQUIRED:
-// 1. Create the app registration and client secret manually via Azure Portal or 'az ad app create'
-// 2. Get the Application (Client) ID from the app registration
-// 3. Store both in Key Vault under 'entra-client-id' and 'entra-client-secret'
-// 4. Set the redirect URI to: https://<appGatewayFqdn>/auth/oidc/callback
-//
-// resource configureEntraSecretScript 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
-//   name: '${environmentName}-configure-entra-secret'
-//   location: location
-//   kind: 'AzureCLI'
-//   identity: {
-//     type: 'UserAssigned'
-//     userAssignedIdentities: {
-//       '${deployIdentity.id}': {}
-//     }
-//   }
-//   properties: {
-//     azCliVersion: '2.52.0'
-//     retentionInterval: 'P1D'
-//     timeout: 'PT10M'
-//     cleanupPreference: 'OnSuccess'
-//     
-//     environmentVariables: [
-//       { name: 'KEYVAULT_NAME', value: keyVault.name }
-//     ]
-//     
-//     scriptContent: '''
-//       #!/bin/bash
-//       set -euo pipefail
-//       echo "[$(date)] Entra configuration skipped - requires manual setup via Portal"
-//     '''
-//   }
-//   
-//   dependsOn: [
-//     generateSecretsScript
-//   ]
-// }
+// Entra ID App Registration is fully automated by the deploy.sh script
+// before the Bicep template execution, injecting the generated secrets
+// directly into the template as parameters, which are securely persisted 
+// into Key Vault during Step 1 above.
 
 // ===== STEP 3: Generate self-signed certificate for Application Gateway =====
 resource generateCertificateScript 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
