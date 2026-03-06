@@ -327,21 +327,56 @@ log "  -> [3/9] Secretos de Key Vault obtenidos."
 # Se instala el driver ODBC de Microsoft para conectarse a Azure SQL Database.
 # Esto es requerido por el adaptador activerecord-sqlserver-adapter.
 # La verificación de idempotencia evita reinstalaciones innecesarias.
+#
+# CAUSA RAÍZ DEL ERROR "NO_PUBKEY EB3E94ADBE1229CF":
+#   El archivo prod.list descargado desde packages.microsoft.com/config/ubuntu/22.04
+#   NO incluye la directiva "signed-by". APT requiere que todo repositorio externo
+#   tenga su clave GPG asociada explícitamente (método moderno desde Ubuntu 22.04).
+#   Sin "signed-by", APT reporta el repositorio como "not signed" y lo rechaza.
+#
+# SOLUCIÓN:
+#   1. Importar la clave GPG de Microsoft a /usr/share/keyrings/ (ubicación estándar
+#      moderna, no la antigua /etc/apt/trusted.gpg.d/).
+#   2. Escribir la entrada del repositorio manualmente incluyendo:
+#      [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg]
+#   Esto vincula explícitamente la clave al repositorio, satisfaciendo el
+#   requisito de APT en Ubuntu 22.04+.
 
-log "[4/9] Verificando driver Microsoft ODBC para SQL Server..."
+log "[4/9] Instalando driver Microsoft ODBC para SQL Server..."
 
 if ! dpkg -l | grep -q msodbcsql17; then
-  log "  -> Instalando driver msodbcsql17..."
+  log "  -> Configurando repositorio Microsoft para ODBC SQL Server..."
+
+  # Instalar dependencias necesarias para repositorios seguros
+  apt-get install -y curl apt-transport-https ca-certificates gnupg
+
+  # Importar clave GPG de Microsoft al keyring moderno (/usr/share/keyrings/)
+  # NUNCA usar la clave desde prod.list (no tiene signed-by) ni apt-key (deprecated)
+  log "  -> Importando clave GPG de Microsoft..."
   curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
-    | gpg --dearmor \
-    | tee /etc/apt/keyrings/microsoft-prod.gpg > /dev/null
-  curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
-    | tee /etc/apt/sources.list.d/mssql-release.list > /dev/null
+    | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+  chmod 644 /usr/share/keyrings/microsoft-prod.gpg
+
+  # Escribir el repositorio manualmente con signed-by explícito
+  # NO usar prod.list descargado: omite signed-by y causa "not signed" error
+  log "  -> Registrando repositorio Microsoft Ubuntu 22.04 prod con signed-by..."
+  echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] \
+https://packages.microsoft.com/ubuntu/22.04/prod jammy main" \
+    | tee /etc/apt/sources.list.d/microsoft-prod.list > /dev/null
+
+  # Limpiar y refrescar listas de paquetes para incluir el nuevo repositorio
+  log "  -> Actualizando listas de paquetes tras agregar repositorio Microsoft..."
+  apt-get clean
+  rm -rf /var/lib/apt/lists/*
   apt-get update -y
+
+  # Instalar driver ODBC aceptando el EULA de Microsoft
+  log "  -> Instalando msodbcsql17, mssql-tools y unixodbc-dev..."
   ACCEPT_EULA=Y apt-get install -y msodbcsql17 mssql-tools unixodbc-dev
+
   log "  -> Driver ODBC instalado correctamente."
 else
-  log "  -> Driver msodbcsql17 ya está instalado."
+  log "  -> Driver msodbcsql17 ya está instalado. Omitiendo (idempotente)."
 fi
 log "  -> [4/9] Driver ODBC verificado."
 
