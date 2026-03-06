@@ -194,46 +194,35 @@ echo "  -> Autenticación con Managed Identity completada."
 
 echo "[3/9] Recuperando secretos desde Azure Key Vault: ${KEY_VAULT_NAME}..."
 
-# Contraseña del administrador de Azure SQL
-SQL_PASSWORD=$(az keyvault secret show \
-  --vault-name "${KEY_VAULT_NAME}" \
-  --name "sql-admin-password" \
-  --query "value" \
-  -o tsv 2>/dev/null) \
-  || { echo "ERROR: No se pudo recuperar 'sql-admin-password' desde Key Vault '${KEY_VAULT_NAME}'." >&2; exit 1; }
+get_secret_with_retry() {
+  local secret_name=$1
+  local max_retries=60 # 60 * 10s = 600s = 10 minutes
+  local wait_sec=10
+  local secret_val=""
 
-if [[ -z "${SQL_PASSWORD:-}" ]]; then
-  echo "ERROR: El secreto 'sql-admin-password' fue recuperado pero está vacío. Verificar Key Vault." >&2
-  exit 1
-fi
+  echo "  -> Obteniendo secreto: $secret_name (esperando propagación RBAC si es necesario)..." >&2
+  for i in $(seq 1 $max_retries); do
+    secret_val=$(az keyvault secret show --vault-name "${KEY_VAULT_NAME}" --name "${secret_name}" --query "value" -o tsv 2>/dev/null) || true
+    if [[ -n "$secret_val" ]]; then
+      echo "$secret_val"
+      return 0
+    fi
+    sleep $wait_sec
+  done
+  echo "ERROR: Fallo al obtener el secreto $secret_name después de $((max_retries * wait_sec)) segundos." >&2
+  return 1
+}
+
+# Contraseña del administrador de Azure SQL
+SQL_PASSWORD=$(get_secret_with_retry "sql-admin-password") || exit 1
 echo "  -> sql-admin-password recuperado correctamente."
 
 # Clave secreta de la sesión de Redmine
-REDMINE_SECRET_KEY=$(az keyvault secret show \
-  --vault-name "${KEY_VAULT_NAME}" \
-  --name "redmine-secret-key" \
-  --query "value" \
-  -o tsv 2>/dev/null) \
-  || { echo "ERROR: No se pudo recuperar 'redmine-secret-key' desde Key Vault '${KEY_VAULT_NAME}'." >&2; exit 1; }
-
-if [[ -z "${REDMINE_SECRET_KEY:-}" ]]; then
-  echo "ERROR: El secreto 'redmine-secret-key' fue recuperado pero está vacío. Verificar Key Vault." >&2
-  exit 1
-fi
+REDMINE_SECRET_KEY=$(get_secret_with_retry "redmine-secret-key") || exit 1
 echo "  -> redmine-secret-key recuperado correctamente."
 
 # Secreto del cliente de la App Registration de Entra ID (para OIDC)
-ENTRA_CLIENT_SECRET=$(az keyvault secret show \
-  --vault-name "${KEY_VAULT_NAME}" \
-  --name "entra-client-secret" \
-  --query "value" \
-  -o tsv 2>/dev/null) \
-  || { echo "ERROR: No se pudo recuperar 'entra-client-secret' desde Key Vault '${KEY_VAULT_NAME}'." >&2; exit 1; }
-
-if [[ -z "${ENTRA_CLIENT_SECRET:-}" ]]; then
-  echo "ERROR: El secreto 'entra-client-secret' fue recuperado pero está vacío. Verificar Key Vault." >&2
-  exit 1
-fi
+ENTRA_CLIENT_SECRET=$(get_secret_with_retry "entra-client-secret") || exit 1
 echo "  -> entra-client-secret recuperado correctamente."
 
 echo "  -> Todos los secretos recuperados exitosamente."
