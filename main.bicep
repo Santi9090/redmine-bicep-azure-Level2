@@ -315,7 +315,7 @@ resource sqlServer 'Microsoft.Sql/servers@2022-11-01-preview' = {
     publicNetworkAccess: 'Disabled'
     minimalTlsVersion: '1.2'
   }
-  dependsOn: [kvSqlPwd]
+  dependsOn: [keyVault, kvSqlPwd]
 }
 
 resource sqlDb 'Microsoft.Sql/servers/databases@2022-11-01-preview' = {
@@ -352,7 +352,7 @@ resource privateEndpointSql 'Microsoft.Network/privateEndpoints@2023-04-01' = {
       }
     ]
   }
-  dependsOn: [vnet]
+  dependsOn: [vnet, sqlServer]
 }
 
 #disable-next-line no-hardcoded-env-urls
@@ -455,8 +455,13 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-03-01' = {
         }
       ]
     }
+    diagnosticsProfile: {
+      bootDiagnostics: {
+        enabled: true
+      }
+    }
   }
-  dependsOn: [privateDnsZoneGroup, kvSshPub]
+  dependsOn: [privateEndpointSql, privateDnsZoneGroup, kvSshPub]
 }
 
 // Role Assignment: VM to read Key Vault
@@ -655,7 +660,7 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
       ruleSetVersion: '3.2'
     }
   }
-  dependsOn: [vmExtension, vnet]
+  dependsOn: [vm, vmExtension, vnet]
 }
 
 // ==============================================================================
