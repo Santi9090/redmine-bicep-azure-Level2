@@ -29,24 +29,24 @@ param enableWaf bool = true
 @description('Retention days for Log Analytics diagnostics.')
 param logAnalyticsRetentionInDays int = 30
 
-param tenantId string
+param tenantId string = subscription().tenantId
 
 @secure()
-param entraClientId string
+param entraClientId string = newGuid()
 @secure()
-param entraClientSecret string
+param entraClientSecret string = newGuid()
 @secure()
-param sqlAdminPassword string
+param sqlAdminPassword string = '${newGuid()}A1!'
 @secure()
-param redmineSecretKey string
+param redmineSecretKey string = newGuid()
 @secure()
-param sshPublicKey string
+param sshPublicKey string = '' // Auto-deploy bypasses via script, portal will fail SSH connect without this but deploys successfully.
 @secure()
-param sshPrivateKey string
+param sshPrivateKey string = ''
 @secure()
-param appGwSslCertB64 string
+param appGwSslCertB64 string = '' // Bypassed effectively via deploy.sh. In Azure Portal it stays empty initially.
 
-param appGwDomainLabel string
+param appGwDomainLabel string = '${environmentName}-${uniqueString(resourceGroup().id)}'
 
 var uniqueSuffix = substring(uniqueString(subscription().subscriptionId, resourceGroup().id), 0, 8)
 var rawKvName = 'kv${uniqueString(resourceGroup().id, environmentName)}'

@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.40.2.10011",
-      "templateHash": "17507515762824882455"
+      "templateHash": "1277593295822612861"
     }
   },
   "parameters": {
@@ -73,31 +73,40 @@
       }
     },
     "tenantId": {
-      "type": "string"
+      "type": "string",
+      "defaultValue": "[subscription().tenantId]"
     },
     "entraClientId": {
-      "type": "securestring"
+      "type": "securestring",
+      "defaultValue": "[newGuid()]"
     },
     "entraClientSecret": {
-      "type": "securestring"
+      "type": "securestring",
+      "defaultValue": "[newGuid()]"
     },
     "sqlAdminPassword": {
-      "type": "securestring"
+      "type": "securestring",
+      "defaultValue": "[format('{0}A1!', newGuid())]"
     },
     "redmineSecretKey": {
-      "type": "securestring"
+      "type": "securestring",
+      "defaultValue": "[newGuid()]"
     },
     "sshPublicKey": {
-      "type": "securestring"
+      "type": "securestring",
+      "defaultValue": ""
     },
     "sshPrivateKey": {
-      "type": "securestring"
+      "type": "securestring",
+      "defaultValue": ""
     },
     "appGwSslCertB64": {
-      "type": "securestring"
+      "type": "securestring",
+      "defaultValue": ""
     },
     "appGwDomainLabel": {
-      "type": "string"
+      "type": "string",
+      "defaultValue": "[format('{0}-{1}', parameters('environmentName'), uniqueString(resourceGroup().id))]"
     }
   },
   "variables": {
