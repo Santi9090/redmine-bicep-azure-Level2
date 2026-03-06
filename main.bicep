@@ -50,7 +50,7 @@ param appGwDomainLabel string
 
 var uniqueSuffix = substring(uniqueString(subscription().subscriptionId, resourceGroup().id), 0, 8)
 var rawKvName = 'kv${uniqueString(resourceGroup().id, environmentName)}'
-var kvName = length(rawKvName) > 24 ? substring(rawKvName, 0, 24) : rawKvName
+var kvName = rawKvName
 
 var vnetName = '${environmentName}-vnet'
 var nsgName = '${environmentName}-nsg-vm'
@@ -201,7 +201,7 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-04-01' = {
   location: location
   tags: commonTags
   properties: {
-    addressSpace: { addressPrefixes: [ vnetAddressSpace ] }
+    addressSpace: { addressPrefixes: [vnetAddressSpace] }
     subnets: [
       {
         name: subnetAppGwName
@@ -315,7 +315,7 @@ resource sqlServer 'Microsoft.Sql/servers@2022-11-01-preview' = {
     publicNetworkAccess: 'Disabled'
     minimalTlsVersion: '1.2'
   }
-  dependsOn: [ kvSqlPwd ]
+  dependsOn: [kvSqlPwd]
 }
 
 resource sqlDb 'Microsoft.Sql/servers/databases@2022-11-01-preview' = {
@@ -346,13 +346,13 @@ resource privateEndpointSql 'Microsoft.Network/privateEndpoints@2023-04-01' = {
         name: '${environmentName}-sql-plsc'
         properties: {
           privateLinkServiceId: sqlServer.id
-          groupIds: [ 'sqlServer' ]
+          groupIds: ['sqlServer']
           requestMessage: 'Please approve this connection'
         }
       }
     ]
   }
-  dependsOn: [ vnet ]
+  dependsOn: [vnet]
 }
 
 #disable-next-line no-hardcoded-env-urls
@@ -385,7 +385,7 @@ resource privateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneG
       }
     ]
   }
-  dependsOn: [ privateDnsZoneLink ]
+  dependsOn: [privateDnsZoneLink]
 }
 
 // ==============================================================================
@@ -409,7 +409,7 @@ resource nic 'Microsoft.Network/networkInterfaces@2023-04-01' = {
     ]
     networkSecurityGroup: { id: nsgVm.id }
   }
-  dependsOn: [ vnet ]
+  dependsOn: [vnet]
 }
 
 resource vm 'Microsoft.Compute/virtualMachines@2023-03-01' = {
@@ -456,7 +456,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-03-01' = {
       ]
     }
   }
-  dependsOn: [ privateDnsZoneGroup, kvSshPub ]
+  dependsOn: [privateDnsZoneGroup, kvSshPub]
 }
 
 // Role Assignment: VM to read Key Vault
@@ -480,11 +480,11 @@ resource vmExtension 'Microsoft.Compute/virtualMachines/extensions@2023-03-01' =
     typeHandlerVersion: '2.1'
     autoUpgradeMinorVersion: true
     protectedSettings: {
-      fileUris: [ installScriptUrl ]
+      fileUris: [installScriptUrl]
       commandToExecute: 'bash redmine-bicepv2.sh "${keyVault.name}" "${sqlServer.properties.fullyQualifiedDomainName}" "${sqlDbName}" "${tenantId}" "${entraClientId}" "${appGwPip.properties.dnsSettings.fqdn}"'
     }
   }
-  dependsOn: [ roleAssignKvSecretsToVm ]
+  dependsOn: [roleAssignKvSecretsToVm]
 }
 
 // ==============================================================================
@@ -565,7 +565,13 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
       {
         name: 'listener_80'
         properties: {
-          frontendIPConfiguration: { id: resourceId('Microsoft.Network/applicationGateways/frontendIPConfigurations', appGwName, 'appGatewayFrontendIP') }
+          frontendIPConfiguration: {
+            id: resourceId(
+              'Microsoft.Network/applicationGateways/frontendIPConfigurations',
+              appGwName,
+              'appGatewayFrontendIP'
+            )
+          }
           frontendPort: { id: resourceId('Microsoft.Network/applicationGateways/frontendPorts', appGwName, 'port_80') }
           protocol: 'Http'
           requireServerNameIndication: false
@@ -574,10 +580,18 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
       {
         name: 'listener_443'
         properties: {
-          frontendIPConfiguration: { id: resourceId('Microsoft.Network/applicationGateways/frontendIPConfigurations', appGwName, 'appGatewayFrontendIP') }
+          frontendIPConfiguration: {
+            id: resourceId(
+              'Microsoft.Network/applicationGateways/frontendIPConfigurations',
+              appGwName,
+              'appGatewayFrontendIP'
+            )
+          }
           frontendPort: { id: resourceId('Microsoft.Network/applicationGateways/frontendPorts', appGwName, 'port_443') }
           protocol: 'Https'
-          sslCertificate: { id: resourceId('Microsoft.Network/applicationGateways/sslCertificates', appGwName, 'appGwSslCert') }
+          sslCertificate: {
+            id: resourceId('Microsoft.Network/applicationGateways/sslCertificates', appGwName, 'appGwSslCert')
+          }
           requireServerNameIndication: false
         }
       }
@@ -587,8 +601,16 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
         name: 'redirect_http_to_https'
         properties: {
           ruleType: 'Basic'
-          httpListener: { id: resourceId('Microsoft.Network/applicationGateways/httpListeners', appGwName, 'listener_80') }
-          redirectConfiguration: { id: resourceId('Microsoft.Network/applicationGateways/redirectConfigurations', appGwName, 'redirectConfigHttp') }
+          httpListener: {
+            id: resourceId('Microsoft.Network/applicationGateways/httpListeners', appGwName, 'listener_80')
+          }
+          redirectConfiguration: {
+            id: resourceId(
+              'Microsoft.Network/applicationGateways/redirectConfigurations',
+              appGwName,
+              'redirectConfigHttp'
+            )
+          }
           priority: 1
         }
       }
@@ -596,9 +618,19 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
         name: 'rule_secure_redmine'
         properties: {
           ruleType: 'Basic'
-          httpListener: { id: resourceId('Microsoft.Network/applicationGateways/httpListeners', appGwName, 'listener_443') }
-          backendAddressPool: { id: resourceId('Microsoft.Network/applicationGateways/backendAddressPools', appGwName, 'redmineBackendPool') }
-          backendHttpSettings: { id: resourceId('Microsoft.Network/applicationGateways/backendHttpSettingsCollection', appGwName, 'redmineHttpSettings') }
+          httpListener: {
+            id: resourceId('Microsoft.Network/applicationGateways/httpListeners', appGwName, 'listener_443')
+          }
+          backendAddressPool: {
+            id: resourceId('Microsoft.Network/applicationGateways/backendAddressPools', appGwName, 'redmineBackendPool')
+          }
+          backendHttpSettings: {
+            id: resourceId(
+              'Microsoft.Network/applicationGateways/backendHttpSettingsCollection',
+              appGwName,
+              'redmineHttpSettings'
+            )
+          }
           priority: 2
         }
       }
@@ -608,7 +640,9 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
         name: 'redirectConfigHttp'
         properties: {
           redirectType: 'Permanent'
-          targetListener: { id: resourceId('Microsoft.Network/applicationGateways/httpListeners', appGwName, 'listener_443') }
+          targetListener: {
+            id: resourceId('Microsoft.Network/applicationGateways/httpListeners', appGwName, 'listener_443')
+          }
           includePath: true
           includeQueryString: true
         }
@@ -621,7 +655,7 @@ resource appGateway 'Microsoft.Network/applicationGateways@2023-04-01' = {
       ruleSetVersion: '3.2'
     }
   }
-  dependsOn: [ vmExtension, vnet ]
+  dependsOn: [vmExtension, vnet]
 }
 
 // ==============================================================================
