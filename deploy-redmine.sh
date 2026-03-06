@@ -6,6 +6,8 @@
 set -euo pipefail
 
 # Configuration
+cd "$(dirname "$0")"
+
 ENVIRONMENT_NAME=${1:-redminedemo}
 LOCATION=${2:-eastus}
 RESOURCE_GROUP="rg-${ENVIRONMENT_NAME}-${LOCATION}"
