@@ -49,8 +49,7 @@ param appGwSslCertB64 string = '' // Bypassed effectively via deploy.sh. In Azur
 param appGwDomainLabel string = '${environmentName}-${uniqueString(resourceGroup().id)}'
 
 var uniqueSuffix = substring(uniqueString(subscription().subscriptionId, resourceGroup().id), 0, 8)
-var rawKvName = 'kv${uniqueString(resourceGroup().id, environmentName)}'
-var kvName = rawKvName
+var kvName = take('kv-${environmentName}-${uniqueString(resourceGroup().id, environmentName)}', 24)
 
 var vnetName = '${environmentName}-vnet'
 var nsgName = '${environmentName}-nsg-vm'
@@ -253,7 +252,6 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-02-01' = {
     enableRbacAuthorization: true
     enableSoftDelete: true
     softDeleteRetentionInDays: 90
-    enablePurgeProtection: true
     publicNetworkAccess: 'Enabled'
     networkAcls: { defaultAction: 'Allow', bypass: 'AzureServices' }
   }

@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.40.2.10011",
-      "templateHash": "1277593295822612861"
+      "templateHash": "4649619381546427901"
     }
   },
   "parameters": {
@@ -111,8 +111,7 @@
   },
   "variables": {
     "uniqueSuffix": "[substring(uniqueString(subscription().subscriptionId, resourceGroup().id), 0, 8)]",
-    "rawKvName": "[format('kv{0}', uniqueString(resourceGroup().id, parameters('environmentName')))]",
-    "kvName": "[variables('rawKvName')]",
+    "kvName": "[take(format('kv-{0}-{1}', parameters('environmentName'), uniqueString(resourceGroup().id, parameters('environmentName'))), 24)]",
     "vnetName": "[format('{0}-vnet', parameters('environmentName'))]",
     "nsgName": "[format('{0}-nsg-vm', parameters('environmentName'))]",
     "appGwName": "[format('{0}-appgw', parameters('environmentName'))]",
@@ -332,7 +331,6 @@
         "enableRbacAuthorization": true,
         "enableSoftDelete": true,
         "softDeleteRetentionInDays": 90,
-        "enablePurgeProtection": true,
         "publicNetworkAccess": "Enabled",
         "networkAcls": {
           "defaultAction": "Allow",

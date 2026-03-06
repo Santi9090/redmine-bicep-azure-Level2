@@ -108,6 +108,26 @@ if [ "$(az group exists --name "$RESOURCE_GROUP")" = false ]; then
     az group create --name "$RESOURCE_GROUP" --location "$LOCATION" > /dev/null
 fi
 
+# ==============================================================================
+# PRE-DEPLOYMENT: Purge any soft-deleted Key Vault to avoid ConflictError
+# ==============================================================================
+echo "[Pre-Deploy] Checking for soft-deleted Key Vaults matching environment '${ENVIRONMENT_NAME}'..."
+
+DELETED_VAULTS=$(az keyvault list-deleted \
+    --query "[?starts_with(name, 'kv-${ENVIRONMENT_NAME}-')].name" \
+    -o tsv 2>/dev/null || true)
+
+if [ -n "$DELETED_VAULTS" ]; then
+    for VAULT in $DELETED_VAULTS; do
+        echo "  -> Purging soft-deleted vault: $VAULT"
+        az keyvault purge --name "$VAULT" --location "$LOCATION" --no-wait 2>/dev/null || true
+    done
+    echo "  -> Waiting 30s for purge propagation..."
+    sleep 30
+else
+    echo "  -> No conflicting soft-deleted Key Vaults found."
+fi
+
 DEPLOYMENT_NAME="redmine-deploy-$(date +%s)"
 
 echo "  -> Validating Bicep deployment (What-If)..."
